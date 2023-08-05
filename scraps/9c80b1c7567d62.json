@@ -1,0 +1,47 @@
+{
+  "title": "サーバーレスについて改めて調べてみる",
+  "closed": false,
+  "archived": false,
+  "created_at": "2023-08-02",
+  "comments": [
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "このスクラップは今では当たり前のように使われるようになった「サーバーレスアーキテクチャ」について改めて調べてみたメモです。\n\n## 参考図書\n\n- [AWSによるサーバーレスアーキテクチャ ](https://www.shoeisha.co.jp/book/detail/9784798155166)",
+      "body_updated_at": "2023-08-02"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "> 話を始める前に、サーバーレスというのは少し間違った名称だ、ということに触れておいたほうが良いでしょう\n> AWSによるサーバーレスアーキテクチャ P.4より\n\nサーバーレスアーキテクチャとはサーバーが存在しないという意味ではなく、背後にいるサーバーが開発者から直接見えなくなっている(隠蔽されている)、アーキテクチャである。"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "> マイクロサービスとサーバーレスアーキテクチャは、SOAの精神を受け継いでいます\n> (中略)\n> サーバーレスアーキテクチャは、好みに合わせてマイクロサービスの原則をたくさん取り入れても、少しだけ取り入れてもかまわないようにできています。\n>  AWSによるサーバーレスアーキテクチャ P.6〜7より\n\nモノリシックなシステムの機能の一部をサーバーレスアーキテクチャに移譲するといった使い方もできるし、マイクロサービスの各サービスをAWS Lambdaで作る、といったことも可能。",
+      "body_updated_at": "2023-08-02"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "## サーバーレスが向いているケースと向いていないケース\n\n### 向いているケース\n\n- サーバーの構成や管理、パッチ適用、メンテナンスといった運用コストをかけたくない場合\n- サーバーの運用コストを抑えたい場合\n- 記述するコードの量を減らしたい場合\n- スケーラビリティや柔軟性を確保したい場合\n\n### 向いていないケース\n\n- パブリッククラウドが提供できる水準よりも高い信頼性やパフォーマンスを求められる場合\n- OSのカスタマイズや柔軟性が必要となる場合\n- ベンダーロックインを回避したい場合\n- システムを中央集権的にコントロールしたい場合"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "> ウェブ、モバイルアプリケーション以外では、サーバーレスはIoTアプリケーションに向いています。\n>  AWSによるサーバーレスアーキテクチャ P.20より\n\n"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "サーバーレスアーキテクチャのパターンは以下URLを参照\nhttps://aws.amazon.com/jp/serverless/patterns/serverless-pattern/\n\nhttps://pages.awscloud.com/rs/112-TZM-766/images/20221027_23th_ISV_DiveDeepSeminar_ServerlessArchitecture.pdf\n\nhttps://www.youtube.com/watch?v=EoA7nSrVOfU\n\nhttps://d1.awsstatic.com/webinars/jp/pdf/services/20201118_AWS_BlackBet_Serverless_Usecase_Patterns.pdf",
+      "body_updated_at": "2023-08-02"
+    },
+    {
+      "author": "y_uuu",
+      "created_at": "2023-08-02",
+      "body_markdown": "実際のお仕事で使ったことのあるパターン\n\n- API Gateway→Lambda→(SNS→SQS)/DynamoDB/S3\n- (SNS→SQS)/DynamoDB/S3→Lambda\n- EventBridge→Lambda\n- IoT Core→DynamoDB/S3\n- IoT Core→IoT Events/Lambda→(SNS/SQS)/DynamoDB\n- IoT Core→KinesisDataFirehose→S3\n- Lambda→IoT Core",
+      "body_updated_at": "2023-08-02"
+    }
+  ]
+}

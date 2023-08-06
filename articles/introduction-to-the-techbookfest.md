@@ -6,7 +6,9 @@ topics:
   - 技術書典
   - 技術同人誌
   - 執筆
-published: false
+published: true
+published_at: "2023-08-09 09:00"
+publication_name: "fusic"
 ---
 
 本記事は [弊社内](https://zenn.dev/p/fusic) の「技術書典に向けてはじめて執筆をする」という方に向けて、執筆〜頒布の流れを共有する目的で作成しています。

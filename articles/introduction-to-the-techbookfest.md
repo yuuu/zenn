@@ -75,7 +75,7 @@ https://blog.techbookfest.org/2023/06/03/tbf14-print-order/
 Re:VIEW記法は最初は慣れないものですが、重厚なユーザーズガイドが用意されているので、安心ですね。
 https://kauplan.org/reviewstarter/reviewstarter-usersguide-20210314.pdf
 
-あと、自分の場合は [text-lint]() を併用しています。簡単な日本語誤りや冗長な言い回し、表記ゆれを指摘してくれます。
+あと、自分の場合は [textlint](https://github.com/textlint/textlint) を併用しています。簡単な日本語誤りや冗長な言い回し、表記ゆれを指摘してくれます。
 
 セットアップ手順は以下記事を参考にしてください。
 

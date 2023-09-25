@@ -142,8 +142,12 @@ $ git push origin main
 
 ## Pipelineの構築
 
-以下コマンドを実行することでPipelineを構築します。たくさん質問があるので、間違えないように回答するようにしてください。
-あまりにも長いので、適宜コメントで解説します。
+以下コマンドを実行することでPipelineを構築します。
+
+:::message
+たくさん質問があるので、間違えないように回答するようにしてください。
+各回答の意図は適宜コメントで解説します。
+:::
 
 ### 最初のステージの作成
 
@@ -260,7 +264,10 @@ https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/s
 ```
 
 実際にはまだ質問が続くのですが、一旦ここまでが最初のステージの設定となります。
+
+:::message
 終盤に表示された `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` は後ほどGitHub Actionsに設定する必要があるので、手元に残しておくようにしましょう。
+:::
 
 ### 2つ目のステージの作成
 
@@ -428,7 +435,11 @@ $ git push origin main
 
 ### エラーが出た場合の対処法
 
-ここで `Error: Cannot use both --resolve-s3 and --s3-bucket parameters. Please use only one.` というエラーが出ることがあります。これは `samconfig.toml` をpushしている場合に、そのファイルで指定している設定内容とGitHub Actionsで実行している処理内容が競合することが原因です。
+ここで `Error: Cannot use both --resolve-s3 and --s3-bucket parameters. Please use only one.` というエラーが出ることがあります。
+
+![](https://storage.googleapis.com/zenn-user-upload/580d3f1fda2a-20230926.png)
+
+これは `samconfig.toml` をpushしている場合に、そのファイルで指定している設定内容とGitHub Actionsで実行している処理内容が競合することが原因です。
 
 以下のいずれかの方法で対処してください。
 

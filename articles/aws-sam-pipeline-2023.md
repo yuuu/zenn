@@ -19,7 +19,9 @@ https://aws.amazon.com/jp/blogs/compute/introducing-aws-sam-pipelines-automatica
 
 これを使うと本来複雑な手順を経て構築するCI/CDを、簡単に構築することができます。CI/CDの実行先はAWS CodePipelineはもちろん、Jenkins, GitLab CI/CD, GitHub Actions, Bitbucket Pipelinesから選択が可能です。
 
-本記事ではGitHub Actionsを使ったCI/CDの構築手順やハマりやすいポイントをまとめます。
+本記事ではGitHub Actionsを使ったCI/CDの構築手順やハマりやすいポイントをまとめます。手順通りに実行するとGitHub Actions上でこのようなCI/CDパイプラインが構築されます。
+
+![](https://storage.googleapis.com/zenn-user-upload/571a23313a84-20230926.png)
 
 ## 事前準備
 

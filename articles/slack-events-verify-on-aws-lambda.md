@@ -8,6 +8,7 @@ topics:
   - "ruby"
   - "slack"
 published: true
+publication_name: "fusic"
 ---
 
 Amazon API Gateway + AWS Lambdaで構築したAPIで、Slackからのリクエストを受ける際、そのリクエストがSlackからのリクエストかどうか検証する方法に悩んだのでメモ。

@@ -12,6 +12,7 @@ publication_name: "fusic"
 ---
 
 みなさんIoTしてますか？
+
 かつて弊社にはオフィスにあるウォーターサーバーのボトルの残量を、オフィスに行くことなく把握することのできるIoTシステムが運用されていました。その名も「ストック番長」です。
 
 このシステムは、弊社に中途入社した社員が作ったものでシステムの詳細は以下の記事を読むことで知ることができます。
@@ -88,130 +89,59 @@ ESP-WROOM-02を置き換えるべく、導線を切断します。「名探偵�
 新しいFWをArduinoIDEで作成しました。起動→Wi-Fi接続→MQTT接続(AWS IoT Core)→deep sleepというシンプルな処理です。
 
 ```c
-#include <FastLED.h>
-#include <WiFi.h>
-#include <WiFiMulti.h>
-#include <WiFiClientSecure.h>
-#include <PubSubClient.h>
-#include "HX711.h"
-#include "secret.h"
-
-#define PIN_LED 21
-#define NUM_LEDS 1
-#define PIN_DOUT 1
-#define PIN_CLK 3
-#define PERIOD_USEC (3600000000ULL)
-
-#define OFFSET 12
-#define CALIBRATION -2340.214844
-
-CRGB leds[NUM_LEDS];
-WiFiMulti WiFiMulti;
-WiFiClientSecure net = WiFiClientSecure();
-PubSubClient client(net);
-HX711 scale;
-
-void initLED() {
-  FastLED.addLeds<WS2812B, PIN_LED, GRB>(leds, NUM_LEDS);
-  showLED(0, 0, 0);
-}
-
-void showLED(int red, int green, int blue) {
-  leds[0] = CRGB(red, green, blue);
-  FastLED.show();
-}
-
-void connectWiFi() {
-  int sum = 0;
-  WiFiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
-  USBSerial.printf("Waiting connect to WiFi: %s ...", WIFI_SSID);
-  while (WiFiMulti.run() != WL_CONNECTED) {
-    USBSerial.print(".");
-    delay(1000);
-    sum += 1;
-    if (sum == 8) {
-      USBSerial.print("Conncet WiFi failed!");
-      esp_deep_sleep_start();
-    }
-  }
-  USBSerial.println("\nWiFi connected");
-  USBSerial.print("IP address: ");
-  USBSerial.println(WiFi.localIP());
-}
-
-void connectBroker() {
-  int sum = 0;
-  net.setCACert(ROOT_CA);
-  net.setCertificate(CERTIFICATE);
-  net.setPrivateKey(PRIVATE_KEY);
-  client.setServer(ENDPOINT, 8883);
-  while (!client.connect(CLIENT_ID))
-  {
-    USBSerial.print(".");
-    delay(1000);
-    sum += 1;
-    if (sum == 8) {
-      USBSerial.print("Conncet Broker failed!");
-      esp_deep_sleep_start();
-    }
-  }
-  USBSerial.println("\nBroker connected");
-
-}
-
-void publish(float weight) {
-  char buf[64] = {0};
-  sprintf(buf, "{\"weight\": %f}", weight);
-  client.publish(TOPIC, buf);
-}
-
-void init_weight() {
-  scale.begin(PIN_DOUT, PIN_CLK);
-  scale.set_scale(CALIBRATION);
-  // scale.tare();
-
-  while(!scale.is_ready()) {
-    delay(1000);
-  }
-}
-
-float get_weight() {
-  return scale.get_units(10) + OFFSET;
-}
-
 void setup() {
   USBSerial.begin(9600);
   USBSerial.println("start");
   esp_sleep_enable_timer_wakeup(PERIOD_USEC);
 
   initLED();
+
+  // 起動時点で赤点灯
   showLED(10, 0, 0);
   connectWiFi();
+
+  // WiFi接続成功時点で緑点灯
   showLED(0, 10, 0);
-  // connectBroker();
+  connectBroker();
   init_weight();
   float weight = get_weight();
-  // publish(weight);
-  USBSerial.printf("weight: %f\n", weight);
+  publish(weight);
+
+  // データ送信成功時点で青点灯
   showLED(0, 0, 10);
-
   USBSerial.println("end");
-
   delay(1000);
   showLED(0, 0, 0);
   esp_deep_sleep_start();
 }
-
-void loop() {
-  delay(1000);
-}
 ```
 
-## AWS Lamda関数の書き換え
+同じ作業を繰り返し、合計2台の体重計を作成しました。これで準備は完了です。
 
+## クラウド側の設計見直し
+
+このシステムのクラウド側はAWS IoT Core, Amazon DynamoDB, AWS Lambdaを活用したサーバーレスアーキテクチャで構築されていました。今後もこの構成を使い続けるつもりではあったのですが、デバイス側の仕様を変えたことで一部見直しが必要でした。
+
+もともとはデバイス側でSNTPクライアントを動作させ、正確な時刻が付与されたデータがクラウドに送信される前提でした。この時刻情報を突合することで、2台の体重計の測定結果を合算していたのです。
+
+![](https://storage.googleapis.com/zenn-user-upload/25826663532a-20240225.png)
+
+しかし、今回生き返らせたデバイスではSNTPクライアントは使用していません。このため2台の体重計が付与するタイムスタンプは毎回ずれます。
+
+![](https://storage.googleapis.com/zenn-user-upload/0172d9a11fd7-20240225.png)
+
+そこでAmazon DynamoDBのテーブル設計を見直して、それぞれのデバイスの最新の測定結果を覚えておき、Amazon EventBridgeでトリガしたLambda関数にて最新の値を取得・合算する方式にしました。
+
+ついでに、AWS SAMを導入して、これまでできていなかったIaC化もしておきました。
 
 ## 動作確認
 
+運用から早1ヶ月が経過していますが、毎日ボトルの数を通知してくれています。
+
+![](https://storage.googleapis.com/zenn-user-upload/2a2a209a3db8-20240225.png)
 
 ## まとめ
 
+作ったIoTシステムに対する、担当者の引き継ぎやアーキテクチャの変更といった、運用らしい運用ができていることを自分としては喜ばしく感じています。
+
+オフィスで仕事をする人にとって生命線とも言える水を枯渇させないよう、番長にはこれからもしっかり仕事をしてもらいます。

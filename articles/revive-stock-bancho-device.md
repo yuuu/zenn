@@ -13,6 +13,8 @@ publication_name: "fusic"
 
 みなさんIoTしてますか？
 
+![](https://storage.googleapis.com/zenn-user-upload/580cd97b8a56-20240226.jpg)
+
 かつて弊社にはオフィスにあるウォーターサーバーのボトルの残量を、オフィスに行くことなく把握することのできるIoTシステムが運用されていました。その名も「ストック番長」です。
 
 このシステムは、弊社に中途入社した社員が作ったものでシステムの詳細は以下の記事を読むことで知ることができます。
@@ -116,7 +118,11 @@ void setup() {
 }
 ```
 
+ちなみに `PERIOD_USEC` は1時間としています。問題なさそうであれば徐々に周期は延ばしていく予定です。
+
 同じ作業を繰り返し、合計2台の体重計を作成しました。これで準備は完了です。
+
+![](https://storage.googleapis.com/zenn-user-upload/c823a853d9c7-20240226.jpg)
 
 ## クラウド側の設計見直し
 
@@ -138,9 +144,11 @@ void setup() {
 
 運用から早1ヶ月が経過していますが、毎日ボトルの数を通知してくれています。
 
-![](https://storage.googleapis.com/zenn-user-upload/2a2a209a3db8-20240225.png)
+![](https://storage.googleapis.com/zenn-user-upload/0fd2686e3d14-20240226.png)
 
 ## まとめ
+
+![](https://storage.googleapis.com/zenn-user-upload/d57439c1d0d7-20240226.jpg)
 
 作ったIoTシステムに対する、担当者の引き継ぎやアーキテクチャの変更といった、運用らしい運用ができていることを自分としては喜ばしく感じています。
 

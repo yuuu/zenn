@@ -234,5 +234,5 @@ Deep Sleep時の消費電流は期待通りの値を確認することができ�
 
 PPK2購入にあたり、以下の記事を参考にさせていただきました。ありがとうございます。
 
-- https://lang-ship.com/blog/work/power-profiler-kit-iinrf-ppk2/
-- https://elchika.com/article/a25d7295-84ad-4426-a834-0539a39d8333/
+https://lang-ship.com/blog/work/power-profiler-kit-iinrf-ppk2/
+https://elchika.com/article/a25d7295-84ad-4426-a834-0539a39d8333/

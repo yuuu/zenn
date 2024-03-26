@@ -12,6 +12,7 @@ publication_name: "fusic"
 ---
 
 先日、Nordic Semiconductor Power Profiler Kit II(PPK2)という製品を入手しました。
+
 この製品は名前のとおり、組み込みシステムの消費電流を簡単に計測するツールで、PCとUSB接続をし、VOUT/GNDを対象の機器に接続することで簡単に消費電流を計測できます。
 
 ![](https://storage.googleapis.com/zenn-user-upload/fd002618d6f8-20240327.png)

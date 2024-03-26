@@ -229,3 +229,10 @@ Deep Sleep中を拡大
 Deep Sleep時の消費電流は期待通りの値を確認することができました。
 
 電池駆動するIoT機器を作る際は、いかにDeep Sleepする時間を長く、Wi-Fi接続・通信する時間を短くするかが、電池交換の周期を長くするための勘所になりそうです。
+
+## 参考記事
+
+PPK2購入にあたり、以下の記事を参考にさせていただきました。ありがとうございます。
+
+- https://lang-ship.com/blog/work/power-profiler-kit-iinrf-ppk2/
+- https://elchika.com/article/a25d7295-84ad-4426-a834-0539a39d8333/

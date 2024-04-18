@@ -6,7 +6,9 @@ topics:
   - aws
   - awsiotcore
   - iot
-published: false
+published: true
+published_at: "2024-04-18 15:00"
+publication_name: "fusic"
 ---
 
 AWSを用いたIoTシステムにおいて、真っ先に候補に上がるサービスがAWS IoT Coreです。

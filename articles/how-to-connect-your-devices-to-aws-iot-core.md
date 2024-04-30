@@ -101,6 +101,75 @@ AWS IoT Coreのコンソール画面左側のメニューにて、「すべて�
 
 ![](https://storage.googleapis.com/zenn-user-upload/b58d170098d2-20240417.png)
 
+## 証明書を削除する
+
+作った証明書を破棄する際は以下の手順で操作ください。
+証明書はモノ・ポリシーから切り離された状態でないと削除できないため、操作が複雑です。注意してください。
+
+### モノにアタッチされた証明書を削除する
+
+AWS IoT Coreのコンソール画面左側のメニューにて、「すべてのデバイス」→「モノ」をクリックします。削除したいモノのリンクをクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/b51454ab2ec5-20240501.png)
+
+「証明書」タブを開き、表示される証明書を選択します。証明書が複数存在する場合は、証明書の数だけ以降の操作を繰り返してください。
+
+![](https://storage.googleapis.com/zenn-user-upload/095b7412e27d-20240501.png)
+
+表示されるポリシーを選択し、「ポリシーをデタッチ」をクリックします。ポリシーが複数存在する場合は、ポリシーの数だけ操作を繰り返してください。
+
+![](https://storage.googleapis.com/zenn-user-upload/789332c67f7e-20240501.png)
+
+モーダルが表示されるので「デタッチ」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/01b84250f499-20240501.png)
+
+ポリシーを全てデタッチしたら、次に「モノ」タブを開き、表示されるモノを選択し、「モノからのデタッチ」をクリックします。モノが複数存在する場合は、モノの数だけ操作を繰り返してください。
+
+![](https://storage.googleapis.com/zenn-user-upload/6b6491f8bb94-20240501.png)
+
+モーダルが表示されるので「デタッチ」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/38f312adf7b2-20240501.png)
+
+画面上部に戻り「アクション」→「無効化」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/83ee917525a1-20240501.png)
+
+モーダルが表示されるので「無効化」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/02a672bea7f2-20240501.png)
+
+次に「アクション」→「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/da012774da56-20240501.png)
+
+モーダルが表示されるので「削除」と入力して、「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/e3772224a310-20240501.png)
+
+### モノを削除する
+
+AWS IoT Coreのコンソール画面左側のメニューにて、「すべてのデバイス」→「モノ」をクリックします。削除したいモノを選択して「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/24561ef5804f-20240501.png)
+
+モーダルが表示されるのでモノの名前を入力して「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/753cb1d1c84b-20240501.png)
+
+### ポリシーを削除する
+
+ポリシーも不要であれば削除しておきましょう。
+
+AWS IoT Coreのコンソール画面左側のメニューにて、「セキュリティ」→「ポリシー」をクリックします。削除したいポリシーを選択して「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/0af5032ffe4d-20240501.png)
+
+モーダルが表示されるのでポリシーの名前を入力して「削除」をクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/357ed2a56b13-20240501.png)
+
 ## まとめ
 
 以上がエンドポイントの確認および証明書の作成手順です。これらの情報をデバイスに渡すことで、デバイスから接続やデータの送信が行えるようになります。

@@ -43,7 +43,7 @@ publication_name: "fusic"
 https://aws.amazon.com/jp/blogs/news/setting-up-a-minecraft-java-server-on-amazon-ec2/
 
 :::message
-ちなみに、この記事のユーザーデータのスクリプト中でインストールしている `java-17-amazon-corretto-headless` だと、最新版のマインクラフト `1.20.6` は起動できませんでした。
+この記事について、ユーザーデータのスクリプト中でインストールしている `java-17-amazon-corretto-headless` だと、最新版のマインクラフト `1.20.6` は起動できませんでした。
 代わりに `java-21-amazon-corretto-headless` をインストールするようにしましょう。
 :::
 

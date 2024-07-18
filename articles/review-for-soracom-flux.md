@@ -161,7 +161,7 @@ Slackへ10秒ごとにPOSTされていれば導通確認成功です。
 
 ![](https://storage.googleapis.com/zenn-user-upload/b00aa9b28bea-20240718.png)
 
-## 生成AIの動作確認
+## 生成AIを使ったアクションの動作確認
 
 Wio LTEの電源をONして、AIアクションの実行履歴を確認します。
 

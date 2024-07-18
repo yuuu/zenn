@@ -147,9 +147,15 @@ Slackへ10秒ごとにPOSTされていれば導通確認成功です。
 
 ![](https://storage.googleapis.com/zenn-user-upload/6b7ac409a8c3-20240718.png)
 
-ここで使用する生成AIやプロンプトの入力ができます。今回は次の画像のように入力してみました。入力後に「作成する」ボタンをクリックします。
+ここで使用する生成AIやプロンプトの入力ができます。今回は次のように入力してみました。
 
-![](https://storage.googleapis.com/zenn-user-upload/6d9fa0f84ea3-20240718.png)
+- 後述するクレジットの制限を回避するためAIモデルはOpenAI(GPT-4o)を使用
+- 自身のOpenAIのAPI Keyを認証情報として設定
+- プロンプトは日本語で記述。気温の部分は `#{event.payload.temperature}` と書くことで動的にJSONの値を埋め込める
+
+入力後に「作成する」ボタンをクリックします。
+
+![](https://storage.googleapis.com/zenn-user-upload/b298a19184f0-20240718.png)
 
 するとこのようにフローが分岐しました。
 

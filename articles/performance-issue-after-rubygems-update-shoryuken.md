@@ -25,7 +25,11 @@ Shoryukenを批判する意図はありません。むしろ、Shoryukenが健�
 
 Shoryukenをアップデートによって、SQSにエンキューされたメッセージがデキューされるまでに最大40秒程度かかるケースが散見されるようになりました。
 
+![](https://storage.googleapis.com/zenn-user-upload/95f86fcb7ae2-20240927.png)
+
 アップデート前はほぼ即座にデキューされていました。
+
+![](https://storage.googleapis.com/zenn-user-upload/d3c535522559-20240927.png)
 
 ## 発生条件
 
@@ -44,6 +48,8 @@ Shoryukenをアップデートによって、SQSにエンキューされたメ�
 
 アップデートによってバージョンが上がったことで、これまで機能していなかった `delay` オプションが機能するようになり、SQSへのフェッチ周期が下がったためです。
 
+![](https://storage.googleapis.com/zenn-user-upload/70f522c65808-20240927.png)
+
 バージョン4以前のShoryukenは `batch: true` を指定しているときに `delay` の指定が機能しないという問題を抱えていました。
 https://github.com/ruby-shoryuken/shoryuken/issues/568
 
@@ -54,8 +60,11 @@ https://github.com/ruby-shoryuken/shoryuken/issues/568
 ## 対処
 
 `delay` の値がアップデート前の値と同じになるよう、 `delay` を `0` としました。
-
 そもそも、アップデート前は `60` が指定されていましたが、これは機能していなかったということになります。
+
+SQSへのフェッチ周期も元通りになっていました。
+
+![](https://storage.googleapis.com/zenn-user-upload/5c2dfa74591e-20240927.png)
 
 ## 再発防止
 

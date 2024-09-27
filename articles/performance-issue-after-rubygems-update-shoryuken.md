@@ -6,7 +6,8 @@ topics:
   - aws
   - sqs
   - ruby
-published: false
+published: true
+publication_name: "fusic"
 ---
 
 ストリーミングデータを扱う際や外部システムと連携する際に、メッセージキューイングサービスであるAmazon SQS(以下、SQS)がしばしば用いられます。私自身、普段はRubyでシステムを開発することが多いため、SQSクライアントとして「Shoryuken」というRubyGemを使っています。

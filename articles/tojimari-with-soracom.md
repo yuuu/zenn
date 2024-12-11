@@ -12,7 +12,7 @@ published_at: "2024-12-11 06:45"
 publication_name: fusic
 ---
 
-本記事は[SORACOM Advent Calendar 2024](https://qiita.com/advent-calendar/2024)の11日目の記事です。
+本記事は[SORACOM Advent Calendar 2024](https://qiita.com/advent-calendar/2024/soracom)の11日目の記事です。
 
 世の中には2種類の人間がいます。「窓の施錠をまったく気にしない人間」と「窓の施錠が気になってしまい何度も確認する人間」です。無論、**私は後者**です。
 

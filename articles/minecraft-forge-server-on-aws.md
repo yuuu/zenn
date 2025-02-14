@@ -108,7 +108,7 @@ $ cd forge_server
 次のコマンドで、Installerを実行します。
 
 ```sh
-java -jar ./forge-1.12.2-xx.xx.x.xxxx-installer.jar nogui --in stallServer
+java -jar ./forge-1.12.2-xx.xx.x.xxxx-installer.jar nogui --installServer
 ```
 
 ### サーバーの起動

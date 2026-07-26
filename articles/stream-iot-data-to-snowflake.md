@@ -1,5 +1,5 @@
 ---
-title: "Snowflake × IoT: M5Stackのセンサーデータをコードレスで数秒後にはSnowflakeに届く仕組みを作る"
+title: "Snowflake × IoT: ATOMS3 Liteから送信したセンサーデータを数秒以内にSnowflakeに蓄積する仕組みを作る"
 emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
@@ -14,24 +14,24 @@ publication_name: "fusic"
 
 ## はじめに
 
-M5Stackに接続した環境センサーで計測した温度・湿度・気圧のデータを、AWS IoT Core経由でSnowflakeへリアルタイムに届け続ける仕組みを、実際に手を動かしながら構築します。
+ATOMS3 Liteに接続した環境センサーで計測した温度・湿度・気圧のデータを、AWS IoT Core経由でSnowflakeへリアルタイムに届け続ける仕組みを、実際に手を動かしながら構築します。
 
-ポイントは、Kinesis Data Firehoseに用意されているSnowflakeへのネイティブ連携機能([Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)を裏側で使っています)を使うことで、Lambdaや変換用のアプリケーションコードを一切書かずに、IoTデバイスのデータをSnowflakeのテーブルへ直接ストリーミングできる点です。構築は全てTerraformで行い、実際に作成したコードは記事中でGitHubへリンクしています。
-
-なお、Snowflakeに蓄積したデータの可視化・活用については触れません。あくまで「IoTデバイスのデータをSnowflakeに届けて貯める」ところまでが本記事のスコープです。
+ポイントは、Amazon Data Firehoseに用意されているSnowflakeへのネイティブ連携機能([Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)を裏側で使っています)を使うことで、Lambdaや変換用のアプリケーションコードを一切書かずに、IoTデバイスのデータをSnowflakeのテーブルへ直接ストリーミングできる点です。
 
 ## 全体構成
 
 構築するシステムの全体像は以下の通りです。
 
 ```
-M5Stack(ENV3ユニット) --MQTT/TLS--> AWS IoT Core --IoT Rule--> Kinesis Data Firehose --Snowpipe Streaming--> Snowflake
+ATOMS3 Lite(ENV Ⅲ ユニット) --MQTT/TLS--> AWS IoT Core --IoT Rule--> Amazon Data Firehose --Snowpipe Streaming--> Snowflake
 ```
 
-- **M5Stack + ENV3ユニット**: 温湿度センサー(SHT30)と気圧センサー(QMP6988)を搭載したユニットで、温度・湿度・気圧を計測します
-- **AWS IoT Core**: デバイスからMQTT(TLS)で送信されたデータを受信します
-- **Kinesis Data Firehose**: IoT Coreからのデータをバッファリングし、Snowflakeへ配信します
-- **Snowflake**: Firehoseから届いたデータをテーブルに格納します
+| コンポーネント | 役割 |
+| --- | --- |
+| ATOMS3 Lite + ENV Ⅲ ユニット | 温湿度センサー(SHT30)と気圧センサー(QMP6988)を搭載したユニットで、温度・湿度・気圧を計測します |
+| AWS IoT Core | デバイスからMQTT(TLS)で送信されたデータを受信します |
+| Amazon Data Firehose | IoT Coreからのデータをバッファリングし、Snowflakeへ配信します |
+| Snowflake | Firehoseから届いたデータをテーブルに格納します |
 
 ## 前提条件
 
@@ -41,7 +41,7 @@ M5Stack(ENV3ユニット) --MQTT/TLS--> AWS IoT Core --IoT Rule--> Kinesis Data 
 - Terraform([最新バージョン](https://developer.hashicorp.com/terraform/install))、[AWS provider](https://registry.terraform.io/providers/hashicorp/aws/latest)、[Snowflake provider](https://registry.terraform.io/providers/snowflakedb/snowflake/latest)がインストールできる環境
 - Snowflakeアカウントと、キーペア認証で接続できる管理用ユーザー(Terraformでデータベース・スキーマ・ロール・ユーザーを作成できる権限を持つもの)
   - キーペア認証の設定方法は[Snowflake公式ドキュメント](https://docs.snowflake.com/ja/user-guide/key-pair-auth)を参照してください
-- M5Stackと[ENV3ユニット](https://docs.m5stack.com/ja/unit/envIII)
+- ATOMS3 Liteと[ENV Ⅲ ユニット](https://docs.m5stack.com/ja/unit/envIII)
 
 :::message
 Snowflakeアカウントが共用環境の場合、Role・User・Databaseの名前はアカウント全体でユニークである必要があるため、プレフィックスを付けるなど他利用者との名前衝突に注意してください。
@@ -140,7 +140,7 @@ AWS IoT SQLの`topic(n)`は1始まりです。トピック`env-sensor/ABCD1234`�
 ```hcl:iot.tf
 resource "aws_iot_topic_rule" "env_sensor_to_firehose" {
   name        = "${replace(var.project_name, "-", "_")}_to_firehose"
-  description = "Forward env-sensor telemetry to Kinesis Data Firehose"
+  description = "Forward env-sensor telemetry to Amazon Data Firehose"
   enabled     = true
   sql         = "SELECT *, timestamp() AS event_timestamp, topic(2) AS device_id FROM '${var.project_name}/#'"
   sql_version = "2016-03-23"
@@ -152,9 +152,9 @@ resource "aws_iot_topic_rule" "env_sensor_to_firehose" {
 }
 ```
 
-### Kinesis Data FirehoseでSnowflake配信を構築する
+### Amazon Data FirehoseでSnowflake配信を構築する
 
-Kinesis Data Firehoseには`destination = "snowflake"`を指定するだけで使えるSnowflakeネイティブ連携機能があります。これが実質的にSnowpipe Streamingの窓口になっており、Lambdaなどでの変換処理は不要です。
+Amazon Data Firehoseには`destination = "snowflake"`を指定するだけで使えるSnowflakeネイティブ連携機能があります。これが実質的にSnowpipe Streamingの窓口になっており、Lambdaなどでの変換処理は不要です。
 
 ```hcl:firehose.tf
 resource "aws_kinesis_firehose_delivery_stream" "env_sensor" {
@@ -226,7 +226,7 @@ resource "snowflake_schema" "env_sensor" {
 
 resource "snowflake_service_user" "firehose_ingest" {
   name           = "IOT_STREAM_FIREHOSE_INGEST_USER"
-  comment        = "Kinesis Data Firehoseがキーペア認証で使用するサービスユーザー"
+  comment        = "Amazon Data Firehoseがキーペア認証で使用するサービスユーザー"
   rsa_public_key = local.firehose_public_key_oneline
   default_role   = snowflake_account_role.firehose_ingest.name
 }
@@ -282,7 +282,7 @@ SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW;
 25.5    60.2    1013.25
 ```
 
-### M5Stack側をセットアップする
+### ATOMS3 Lite側をセットアップする
 
 デバイス側のソースコードは以下のリポジトリの`device/env-sensor`を利用しています。
 
@@ -314,51 +314,12 @@ SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW ORDER BY event_timesta
 27.97742    59.4696     1010.086    1784969565318    607856DB5110
 ```
 
-温度27.98℃・湿度59.47%・気圧1010.09hPaという実測値に加えて、`event_timestamp`(Unix時間ミリ秒)と`device_id`(実機のチップID)も正しく記録されていることが確認できました。M5Stackの実測データがコード一行書かずにSnowflakeへ届く仕組みが完成です。
-
-## ハマったところ
-
-### 共用のSnowflakeアカウントで権限が足りなかった
-
-検証に使ったSnowflakeアカウントは他の利用者もいる共用環境で、最初に確認したところ使えるロールは`SYSADMIN`・`PUBLIC`・`SNOWFLAKE_LEARNING_ROLE`のみでした。
-
-```sql
-SELECT CURRENT_AVAILABLE_ROLES();
--- ["SYSADMIN", "PUBLIC", "SNOWFLAKE_LEARNING_ROLE"]
-```
-
-Terraform用の管理ユーザー・ロールを作ろうとしたところ、`CREATE ROLE`の時点でエラーになりました。
-
-```
-SQL access control error: Insufficient privileges to operate on account 'XXXXXXX'.
-Your primary role SYSADMIN must have CREATE ROLE granted on ACCOUNT XXXXXXX.
-```
-
-`CREATE ROLE`・`CREATE USER`・`GRANT ... ON ACCOUNT`はSnowflakeのデフォルト権限モデルでは`SECURITYADMIN`または`ACCOUNTADMIN`の権限が必要で、`SYSADMIN`だけでは実行できません。今回はアカウント管理者に依頼して`ACCOUNTADMIN`を一時的に付与してもらうことで解決しましたが、共用のSnowflakeアカウントでTerraformから権限管理を行う場合は、事前にどのロールが使えるか確認しておくとスムーズです。
-
-### テーブルにカラムを追加したらFirehoseがエラーを吐き続けた
-
-構築が一通り終わった後、`event_timestamp`と`device_id`カラムをテーブルに追加(`snowflake_execute`によるテーブルの再作成)したところ、Firehoseが以下のエラーを吐き続けるようになりました。
-
-```
-Insert to Snowflake has failed due to invalid input data.
-errorCode: Snowflake.ExtraColumns
-```
-
-`DESC TABLE`で確認してもテーブルには確かに新しいカラムが存在しており、原因が分かりませんでした。S3にバックアップされた失敗レコードの詳細を見てみると、次のようなエラーメッセージが記録されていました。
-
-```
-Extra columns: [event_timestamp, device_id]. Columns not present in the table shouldn't be specified
-```
-
-これは、Firehose(裏側のSnowpipe Streamingチャンネル)が接続確立時にテーブルのスキーマを取得してキャッシュしており、テーブルを再作成した後もそのキャッシュを見に行ってしまうことが原因でした。Delivery Streamを一度作り直す(`terraform apply -replace=<デリバリーストリームのリソースアドレス>`)ことでチャンネルが再確立され、新しいスキーマが正しく認識されるようになりました。
-
-テーブルのカラム構成を変更する場合は、Firehose Delivery Streamも合わせて作り直す必要がある、という点は覚えておく価値がありそうです。
+温度27.98℃・湿度59.47%・気圧1010.09hPaという実測値に加えて、`event_timestamp`(Unix時間ミリ秒)と`device_id`(実機のチップID)も正しく記録されていることが確認できました。ATOMS3 Liteの実測データがコード一行書かずにSnowflakeへ届く仕組みが完成です。
 
 ## まとめ
 
-M5Stackで計測した温度・湿度・気圧データを、AWS IoT Core → Kinesis Data Firehose → Snowpipe Streaming経由でSnowflakeへリアルタイムに届ける仕組みを、Terraformだけで構築しました。
+ATOMS3 Liteで計測した温度・湿度・気圧データを、AWS IoT Core → Amazon Data Firehose → Snowpipe Streaming経由でSnowflakeへリアルタイムに届ける仕組みを、Terraformだけで構築しました。
 
-Kinesis Data FirehoseのSnowflakeネイティブ連携を使うことで、Lambdaや変換用のアプリケーションコードを書かずに、IoTデバイスのデータを数秒でSnowflakeのテーブルまで届けられることが確認できました。認証もSnowflake側のキーペア認証のみで完結し、AWS側のIAMロールはS3バックアップ用途にとどまる、というのも構築してみて初めて分かった点でした。
+Amazon Data FirehoseのSnowflakeネイティブ連携を使うことで、Lambdaや変換用のアプリケーションコードを書かずに、IoTデバイスのデータを数秒でSnowflakeのテーブルまで届けられることが確認できました。認証もSnowflake側のキーペア認証のみで完結し、AWS側のIAMロールはS3バックアップ用途にとどまる、というのも構築してみて初めて分かった点でした。
 
 Snowflakeに蓄積したデータの可視化・活用については、別の記事で扱う予定です。

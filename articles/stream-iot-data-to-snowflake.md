@@ -1,5 +1,5 @@
 ---
-title: "Snowflake × IoT: ATOMS3 Liteから送信したセンサーデータを数秒以内にSnowflakeに蓄積する仕組みを作る"
+title: "Snowflake × IoT: Snowpipe Streamingを使ってデバイスから送信したセンサーデータを数秒以内に蓄積する"
 emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
@@ -9,6 +9,7 @@ topics:
   - iot
   - m5stack
 published: true
+published_at: "2026-07-27 07:30"
 publication_name: "fusic"
 ---
 
@@ -16,22 +17,26 @@ publication_name: "fusic"
 
 ATOMS3 Liteに接続した環境センサーで計測した温度・湿度・気圧のデータを、AWS IoT Core経由でSnowflakeへリアルタイムに届け続ける仕組みを、実際に手を動かしながら構築します。
 
-ポイントは、Amazon Data Firehoseに用意されているSnowflakeへのネイティブ連携機能([Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)を裏側で使っています)を使うことで、Lambdaや変換用のアプリケーションコードを一切書かずに、IoTデバイスのデータをSnowflakeのテーブルへ直接ストリーミングできる点です。
+![](/images/stream-iot-data-to-snowflake/snowsight.png)
+
+ポイントは、Amazon Data Firehoseに用意されているSnowflakeへの連携機能([Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)への配信)を使う点です。
+Lambdaや変換用のアプリケーションコードを一切書かずに、IoTデバイスのデータをSnowflakeのテーブルへ直接ストリーミングできます。
 
 ## 全体構成
 
 構築するシステムの全体像は以下の通りです。
 
-```
-ATOMS3 Lite(ENV Ⅲ ユニット) --MQTT/TLS--> AWS IoT Core --IoT Rule--> Amazon Data Firehose --Snowpipe Streaming--> Snowflake
-```
+![](/images/stream-iot-data-to-snowflake/aws-snowflake.png)
 
 | コンポーネント | 役割 |
 | --- | --- |
 | ATOMS3 Lite + ENV Ⅲ ユニット | 温湿度センサー(SHT30)と気圧センサー(QMP6988)を搭載したユニットで、温度・湿度・気圧を計測します |
 | AWS IoT Core | デバイスからMQTT(TLS)で送信されたデータを受信します |
-| Amazon Data Firehose | IoT Coreからのデータをバッファリングし、Snowflakeへ配信します |
-| Snowflake | Firehoseから届いたデータをテーブルに格納します |
+| Amazon Data Firehose | AWS IoT Coreからのデータをバッファリングし、Snowflakeへ配信します |
+| Snowpipe Streaming | Amazon Data Firehoseから配信されたデータをテーブルへ配信します |
+| Snowflake Databases | データの格納先データベースです |
+
+※ATOMS3 LiteはM5Stack社が販売している小型の開発モジュールです。
 
 ## 前提条件
 
@@ -41,7 +46,7 @@ ATOMS3 Lite(ENV Ⅲ ユニット) --MQTT/TLS--> AWS IoT Core --IoT Rule--> Amazo
 - Terraform([最新バージョン](https://developer.hashicorp.com/terraform/install))、[AWS provider](https://registry.terraform.io/providers/hashicorp/aws/latest)、[Snowflake provider](https://registry.terraform.io/providers/snowflakedb/snowflake/latest)がインストールできる環境
 - Snowflakeアカウントと、キーペア認証で接続できる管理用ユーザー(Terraformでデータベース・スキーマ・ロール・ユーザーを作成できる権限を持つもの)
   - キーペア認証の設定方法は[Snowflake公式ドキュメント](https://docs.snowflake.com/ja/user-guide/key-pair-auth)を参照してください
-- ATOMS3 Liteと[ENV Ⅲ ユニット](https://docs.m5stack.com/ja/unit/envIII)
+- [ATOMS3 Lite](https://www.switch-science.com/products/8778)と[ENV Ⅲ ユニット](https://docs.m5stack.com/ja/unit/envIII)
 
 :::message
 Snowflakeアカウントが共用環境の場合、Role・User・Databaseの名前はアカウント全体でユニークである必要があるため、プレフィックスを付けるなど他利用者との名前衝突に注意してください。
@@ -86,7 +91,8 @@ terraform {
 }
 ```
 
-Snowflakeプロバイダは2系がGA(Generally Available)になっており、キーペア認証(`SNOWFLAKE_JWT`)で接続します。AWSプロファイル名など環境固有の値は`terraform.tfvars`(gitignore対象)に切り出し、リポジトリには含めません。
+Snowflakeプロバイダは2系がGA(Generally Available)になっており、キーペア認証(`SNOWFLAKE_JWT`)で接続します。
+AWSプロファイル名など環境固有の値は`terraform.tfvars`(gitignore対象)に切り出し、リポジトリには含めません。
 
 ```hcl:providers.tf
 provider "aws" {
@@ -105,7 +111,8 @@ provider "snowflake" {
 
 ### AWS IoT Core関連リソースを構築する
 
-デバイス用のThing・証明書・Policy・Topic Ruleを作成します。証明書はCSRを指定せずに`aws_iot_certificate`を作成すると、AWS側で鍵ペアごと生成してくれます。
+デバイス用のThing・証明書・Policy・Topic Ruleを作成します。
+証明書はCSRを指定せずに`aws_iot_certificate`を作成すると、AWS側で鍵ペアごと生成してくれます。
 
 利用するデバイス側のプログラム(後述)はMQTTのクライアントIDが`env-sensor-device`に固定されているため、IoT PolicyのConnectアクションもこのクライアントIDに限定しています。
 
@@ -131,10 +138,13 @@ resource "aws_iot_policy" "env_sensor" {
 }
 ```
 
-IoT Ruleでは、受信したメッセージをそのままFirehoseへ転送するだけでなく、`timestamp()`関数でUnix時間(ミリ秒)を、`topic()`関数でMQTTトピック名からデバイスIDを抽出して付加しています。デバイス側はトピック名`env-sensor/<チップID>`宛にpublishしているので、`topic(2)`でチップID部分を取得できます。
+IoT Ruleでは、受信したメッセージをそのままFirehoseへ転送するだけでなく、`timestamp()`関数でUnix時間(ミリ秒)を、`topic()`関数でMQTTトピック名からデバイスIDを抽出・付加しています。
+デバイス側はトピック名`env-sensor/<チップID>`宛にpublishしているため、`topic(2)`でチップID部分を取得できます。
 
-:::message alert
-AWS IoT SQLの`topic(n)`は1始まりです。トピック`env-sensor/ABCD1234`に対して`topic(1)`は`"env-sensor"`、`topic(2)`が`"ABCD1234"`になります。0始まりだと勘違いして`topic(1)`を使ってしまい、意図しない固定文字列がdevice_idに入ってしまうミスをしました。
+:::message
+AWS IoT SQLの`topic(n)`は1始まりです。トピック`env-sensor/ABCD1234`に対して`topic(1)`は`"env-sensor"`、`topic(2)`が`"ABCD1234"`になります。
+0始まりだと勘違いして`topic(1)`を使ってしまうと、意図しない固定文字列がdevice_idに入ってしまうので注意しましょう。
+https://docs.aws.amazon.com/ja_jp/iot/latest/developerguide/iot-sql-functions.html#iot-function-topic
 :::
 
 ```hcl:iot.tf
@@ -154,7 +164,8 @@ resource "aws_iot_topic_rule" "env_sensor_to_firehose" {
 
 ### Amazon Data FirehoseでSnowflake配信を構築する
 
-Amazon Data Firehoseには`destination = "snowflake"`を指定するだけで使えるSnowflakeネイティブ連携機能があります。これが実質的にSnowpipe Streamingの窓口になっており、Lambdaなどでの変換処理は不要です。
+Amazon Data Firehoseには`destination = "snowflake"`を指定するだけで使えるSnowflakeとの連携機能があります。
+これが実質的にSnowpipe Streamingの窓口になっており、Lambdaなどでの変換処理は不要です。
 
 ```hcl:firehose.tf
 resource "aws_kinesis_firehose_delivery_stream" "env_sensor" {
@@ -183,31 +194,11 @@ resource "aws_kinesis_firehose_delivery_stream" "env_sensor" {
 }
 ```
 
-`s3_configuration`はAWS公式ドキュメントで**必須**とされているブロックで、省略できません。Snowflakeへの配信に失敗したレコードはこのS3バケットにバックアップされます。実際、後述する動作確認で発生したエラーも、このバックアップから原因を特定できました。
+`s3_configuration`はAWS公式ドキュメントで**必須**とされているブロックで、省略できません。
+Snowflakeへの配信に失敗したレコードはこのS3バケットにバックアップされます。
 
-ここで一つ発見がありました。`snowflake_configuration`の`role_arn`は、てっきりSnowflakeへの接続(Storage Integrationのような仕組み)に使われるIAMロールだと思っていたのですが、実際はS3へのバックアップ配信やCloudWatch Logsへのアクセスに使われるロールでした。**Snowflakeへの認証自体はIAMを介さず、`user`と`private_key`によるキーペア認証のみで完結します。**
-
-このキーペアも手作業でopensslコマンドを叩いて用意するのではなく、`tls_private_key`リソースでTerraform内で生成し、公開鍵をそのままSnowflakeのユーザーに、秘密鍵をそのままFirehoseの設定に渡しています。
-
-```hcl:snowflake.tf
-resource "tls_private_key" "firehose_ingest" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-locals {
-  # Snowflake / Firehose 双方とも「ヘッダ・フッタなしの1行」の鍵文字列を要求する
-  firehose_public_key_oneline = join("", [
-    for line in split("\n", tls_private_key.firehose_ingest.public_key_pem) :
-    line if !startswith(line, "-----") && line != ""
-  ])
-
-  firehose_private_key_oneline = join("", [
-    for line in split("\n", tls_private_key.firehose_ingest.private_key_pem_pkcs8) :
-    line if !startswith(line, "-----") && line != ""
-  ])
-}
-```
+実際、動作確認時に問題が発生した際、このS3バケットに格納されたオブジェクトがトラブルシュートに役立つことがあります。
+バックアップバケットが存在することを覚えておきましょう。
 
 ### Snowflake側のDatabase/Table/Roleを構築する
 
@@ -233,7 +224,8 @@ resource "snowflake_service_user" "firehose_ingest" {
 ```
 
 :::message
-執筆時点(2026-07)ではテーブルを管理する`snowflake_table`リソースはPreview機能でした。代わりにStableな`snowflake_execute`でCREATE TABLE文を直接実行しています。
+執筆時点(2026-07)ではテーブルを管理する`snowflake_table`リソースはPreview機能でした。
+代わりにStableな`snowflake_execute`でCREATE TABLE文を直接実行しています。
 :::
 
 ```hcl:snowflake.tf
@@ -243,7 +235,7 @@ resource "snowflake_execute" "env_sensor_raw_table" {
 }
 ```
 
-構築したTerraformコード全体は以下のリポジトリで公開しています。
+以上の手順で構築したTerraformコード全体を、以下のリポジトリで公開しています。
 
 https://github.com/yuuu/stream-iot-data-to-snowflake
 
@@ -256,8 +248,8 @@ https://github.com/yuuu/stream-iot-data-to-snowflake
 ```bash
 aws iot-data publish \
   --endpoint-url https://<IoTエンドポイント> \
-  --topic "env-sensor/test" \
-  --payload '{"temperature": 25.5, "humidity": 60.2, "pressure": 1013.25}' \
+  --topic "env-sensor/TESTDEVICE123" \
+  --payload '{"temperature": 22.2, "humidity": 55.5, "pressure": 1005.5}' \
   --cli-binary-format raw-in-base64-out
 ```
 
@@ -275,26 +267,31 @@ aws cloudwatch get-metric-statistics \
 実際に試したところ、`DataFreshness`は8秒でした。バッチ処理を挟まずに、送信から数秒でSnowflakeのテーブルに反映されます。
 
 ```sql
-SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW;
+SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW LIMIT 1;
 ```
 
 ```
-25.5    60.2    1013.25
+TEMPERATURE	HUMIDITY	PRESSURE	EVENT_TIMESTAMP	DEVICE_ID
+22.2	55.5	1005.5	1784969578218	TESTDEVICE123
 ```
 
 ### ATOMS3 Lite側をセットアップする
+
+![](/images/stream-iot-data-to-snowflake/atoms3-lite-unit-env-iii.jpeg)
 
 デバイス側のソースコードは以下のリポジトリの`device/env-sensor`を利用しています。
 
 https://github.com/yuuu/aws-m5stack-iot-handson-book-site/tree/main/device
 
-このリポジトリには証明書一式を読み込んで`arduino_secrets.h`を対話的に生成するスクリプトが用意されているので、Terraformが生成した証明書(`AmazonRootCA1.pem`・デバイス証明書・秘密鍵)を`device/env-sensor/certs/`にコピーしてから実行します。
+このリポジトリには証明書一式を読み込んで`arduino_secrets.h`を対話的に生成するスクリプトを格納しています。
+Terraformが生成した証明書(`AmazonRootCA1.pem`・デバイス証明書・秘密鍵)を`device/env-sensor/certs/`にコピーしてから実行します。
 
 ```bash
 ./create-arduino-secrets.sh
 ```
 
-Wi-Fi SSID/パスワードとAWS IoTエンドポイントを入力すると、証明書ファイルは自動検出されて`arduino_secrets.h`が生成されます。あとはビルドして実機に書き込みます。
+Wi-Fi SSID/パスワードとAWS IoTエンドポイントを入力します。
+証明書ファイルは自動検出されて`arduino_secrets.h`が生成されます。あとはビルドして実機に書き込みます。
 
 ```bash
 make build
@@ -307,19 +304,27 @@ make monitor
 実機がAWS IoT Coreへpublishを開始したら、再度Snowflakeでテーブルを確認します。
 
 ```sql
-SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW ORDER BY event_timestamp DESC;
+SELECT * FROM IOT_STREAM_IOT_DB.ENV_SENSOR.ENV_SENSOR_RAW ORDER BY EVENT_TIMESTAMP DESC LIMIT 5;
 ```
 
 ```
-27.97742    59.4696     1010.086    1784969565318    607856DB5110
+TEMPERATURE	HUMIDITY	PRESSURE	EVENT_TIMESTAMP	DEVICE_ID
+30.95216	72.64099	1009.547	1785044144693	607856DB5110
+30.93881	72.6593		1009.564	1785044084674	607856DB5110
+30.92279	72.66693	1009.557	1785044024672	607856DB5110
+30.93881	72.65015	1009.531	1785043964703	607856DB5110
+30.95216	72.70508	1009.539	1785043904970	607856DB5110
 ```
 
-温度27.98℃・湿度59.47%・気圧1010.09hPaという実測値に加えて、`event_timestamp`(Unix時間ミリ秒)と`device_id`(実機のチップID)も正しく記録されていることが確認できました。ATOMS3 Liteの実測データがコード一行書かずにSnowflakeへ届く仕組みが完成です。
+`event_timestamp`(Unix時間ミリ秒)と`device_id`(実機のチップID)も正しく記録されていることが確認できました。
+ATOMS3 Liteの実測データがSnowflakeへ蓄積されていることがわかります。
+
+このように気温推移の時系列グラフも簡単に表示できます。
+
+![](/images/stream-iot-data-to-snowflake/snowsight.png)
 
 ## まとめ
 
 ATOMS3 Liteで計測した温度・湿度・気圧データを、AWS IoT Core → Amazon Data Firehose → Snowpipe Streaming経由でSnowflakeへリアルタイムに届ける仕組みを、Terraformだけで構築しました。
 
-Amazon Data FirehoseのSnowflakeネイティブ連携を使うことで、Lambdaや変換用のアプリケーションコードを書かずに、IoTデバイスのデータを数秒でSnowflakeのテーブルまで届けられることが確認できました。認証もSnowflake側のキーペア認証のみで完結し、AWS側のIAMロールはS3バックアップ用途にとどまる、というのも構築してみて初めて分かった点でした。
-
-Snowflakeに蓄積したデータの可視化・活用については、別の記事で扱う予定です。
+Amazon Data FirehoseのSnowflakeネイティブ連携を使うことで、Lambdaや変換用のアプリケーションコードを書かずに、IoTデバイスのデータを数秒でSnowflakeのテーブルまで届けられることが確認できました。

@@ -17,7 +17,7 @@ Snowflake Dynamic tables(動的テーブル)は定義されたクエリとター
 ![](/images/snowflake-dynamic-tables-for-iot/snowflake_dynamic_tables.png)
 <!--MEMO: ここにイメージ図を載せたい-->
 
-AWSでETL(Extract->Load->Transform)を実現しようとするとAWS GlueやAWS Lambdaといったサービスを間に挟む必要があり、構成や設定が複雑化しがちですし、それらのメンテナンスにも一定のコストがかかります。
+AWSでELT(Extract->Load->Transform)を実現しようとするとAWS GlueやAWS Lambdaといったサービスを間に挟む必要があり、構成や設定が複雑化しがちですし、それらのメンテナンスにも一定のコストがかかります。
 
 一方で、動的テーブルはSnowflakeに蓄積したデータをSQLで変換し定期的に別テーブルとして自動更新するため、Snowflake内に完結しますし、楽です。
 

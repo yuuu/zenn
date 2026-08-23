@@ -58,7 +58,7 @@ CREATE ALERT <name>
 5. AlertをRESUMEする実行
 
 :::message
-執筆時点(2026-08)では、TerraformプロバイダのSnowflake providerが提供する`snowflake_alert`リソース[^1]・`snowflake_notification_integration`リソース[^2]はいずれもPreview機能です(`snowflake_notification_integration`に至ってはTYPE=EMAILそのものに対応していません)。
+執筆時点(2026-08)では、TerraformのSnowflakeプロバイダが提供する`snowflake_alert`リソース[^1]・`snowflake_notification_integration`リソース[^2]はいずれもPreview機能です(`snowflake_notification_integration`に至っては`TYPE = EMAIL`そのものに対応していません)。
 本記事でも、前回記事の`ENV_SENSOR_RAW`テーブル作成時と同様、これらをStableな`snowflake_execute`リソースで代替しています。
 :::
 
@@ -228,11 +228,11 @@ WHERE TO_TIMESTAMP_LTZ(event_timestamp / 1000)
 
 `SNOWFLAKE.ALERT.LAST_SUCCESSFUL_SCHEDULED_TIME()`は「前回成功したスケジュール実行の時刻」、`SNOWFLAKE.ALERT.SCHEDULED_TIME()`は「今回の実行がスケジュールされた時刻」を返す関数で、この2つの間に絞り込むことで「前回チェック以降の新規行だけ」を対象にできます。
 
-ところが検証してみると、これでは閾値超過が続く限り毎回のスケジュール実行(1分毎)で検知され続けることが分かりました。
+ところが検証してみると、これではしきい値超過が続く限り毎回のスケジュール実行(1分毎)で検知され続けることが分かりました。
 
 ### DEVICE_ID ごとのエッジ検知に変更する
 
-そこで、単に「30度を超えている」ではなく、「 `DEVICE_ID` ごとに、直前の行は30度以下だったのに、今回は30度を超えた」という立ち上がりエッジだけを検知するように変更しました。
+そこで、単に「30度を超えている」ではなく、「`DEVICE_ID`ごとに、直前の行は30度以下だったのに、今回は30度を超えた」という立ち上がりエッジだけを検知するように変更しました。
 
 `LAG(temperature) OVER (PARTITION BY device_id ORDER BY event_timestamp)`で「同じ `DEVICE_ID` の直前の行の温度」を取得し、`temperature > 30 AND (prev_temperature IS NULL OR prev_temperature <= 30)`で絞り込みます。
 
@@ -366,7 +366,7 @@ DEVICE_ID=test-deviceの温度が30度を超えました。
 
 Snowflakeに蓄積したIoTセンサーデータに対して、外部の監視サービスを使わずSnowflake Alertだけでしきい値超過を検知・通知する仕組みを構築しました。
 
-単純な「しきい値超過」を検知条件にすると、超過状態が続く限り通知され続けてしまう(アラート疲れ)という点に注意が必要でしたが、`LAG()`によるエッジ検知に切り替えることで解決できました。
+単純な「しきい値超過」を検知条件にすると、超過状態が続く限り通知され続けてしまう(Alert疲れ)という点に注意が必要でしたが、`LAG()`によるエッジ検知に切り替えることで解決できました。
 また、`snowflake_execute`でAlertを管理する場合は、SQLを変更するたびにAlertがDROP→CREATEされ直す点や、それに伴う「初回実行時の過去データ一括検知」「RESUMEの再実行漏れ」といった、Terraform運用ならではの落とし穴もいくつか踏みました。
 
 構築したTerraformコードは以下のリポジトリで公開しています。

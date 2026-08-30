@@ -18,48 +18,17 @@ publication_name: "fusic"
 
 https://zenn.dev/fusic/articles/stream-iot-data-to-snowflake
 
-このときはAmazon Data Firehoseの「Snowflakeへのネイティブ連携」を使い、Lambdaも変換コードも書かずにテーブルまで届けました。
-シンプルさが魅力です。
+Amazon MSK(Managed Streaming for Apache Kafka)でもSnowflakeへデータを配信できます。
+AWS IoT Coreが受け取ったメッセージをKafkaトピックへ転送し、そこからSnowflakeへ配信する構成です。
 
-似た用途はAmazon MSK(Managed Streaming for Apache Kafka)でも組めます。
-IoT Coreが受け取ったメッセージをKafkaトピックへ流し、そこからSnowflakeへ配信する構成です。
-
-今回はその続編として、AWS IoT Core → Amazon MSK → Snowflake をTerraformで構築し、前回のFirehose版との違いを手を動かして確認します。
-
+というわけで本記事では、AWS IoT Core → Amazon MSK → Snowflake を構築し、前回のFirehose版との違いを手を動かして確認します。
 構築したTerraformコードはリポジトリの `terraform/kafka/` で公開しています。
 
 https://github.com/yuuu/stream-iot-data-to-snowflake
 
-## なぜMSK(Kafka)を挟むのか
-
-Firehose直結に対して、あいだにKafkaを置くと以下が得られます。
-
-| 得られるもの | 内容 |
-| --- | --- |
-| ファンアウト | 1本のトピックを複数のコンシューマグループが独立して購読できる。「Snowflakeへの蓄積」と「ダッシュボード用のリアルタイム処理」を、片方の障害や再起動が他方に波及しない形で同居させられる |
-| リプレイ | メッセージはリテンション期間ブローカーに残る。オフセットを巻き戻せば過去分を読み直せるので、取り込み先の追加やバグ修正後の再処理がしやすい |
-| 順序保証 | メッセージキーで同じパーティションに寄せたイベントは、その中で順序が保たれる。今回は `device_id` をキーにして同一デバイスのイベント順序を守る |
-| ストリーム処理エコシステム | Kafka Connect / Kafka Streams / Flink / 各種コンシューマライブラリなど、Kafka前提の資産をそのまま乗せられる。既存のKafka基盤があれば相乗りできる |
-
-代わりにトレードオフもあります。
-
-| トレードオフ | 内容 |
-| --- | --- |
-| 運用コスト | ブローカーが立っているあいだ課金され続ける。最小構成(`kafka.t3.small` ×3 + NAT Gateway + MSK Connect)でも概算 $5/日。Firehoseの従量課金とは性格が違う |
-| VPCが必要 | MSKはVPC内リソース。IoT Rule・MSK Connectの双方にVPC経由の接続と、サブネット / セキュリティグループ /(場合により)NAT Gatewayの設計が要る |
-| 認証設計 | コンポーネントによって使える認証方式が違い、1方式に統一できない(後述) |
-
 ## 全体構成
 
 ![構成図](/images/iot-kafka-snowflake-procedure/architecture.png)
-
-```
-ATOMS3 Lite + ENV III
-  --MQTT(TLS)--> AWS IoT Core
-    --IoT Rule(Kafka Action / VPC destination)-->
-      Amazon MSK  トピック: env-sensor-telemetry
-        --MSK Connect + Snowflake Kafka Connector(Snowpipe Streaming)--> Snowflake
-```
 
 | コンポーネント | 役割 |
 | --- | --- |
@@ -79,6 +48,27 @@ ATOMS3 Lite + ENV III
 - Terraform、[AWS provider](https://registry.terraform.io/providers/hashicorp/aws/latest)、[Snowflake provider](https://registry.terraform.io/providers/snowflakedb/snowflake/latest)がインストールできる環境
 - Snowflakeアカウントと、キーペア認証で接続できる管理用ユーザー(前回記事のセットアップを流用)
 - [ATOMS3 Lite](https://www.switch-science.com/products/8778)と[ENV Ⅲ ユニット](https://docs.m5stack.com/ja/unit/envIII)(前回記事でセットアップ済みのものをそのまま使います)
+
+## MSK(Kafka)を挟むメリット・デメリット
+
+AWSとSnowflakeの接続点をKafkaとすることで次のようなメリットがあります。
+
+| メリット | 内容 |
+| --- | --- |
+| ファンアウト | 1本のトピックを複数のコンシューマグループが独立して購読できる。「Snowflakeへの蓄積」と「ダッシュボード用のリアルタイム処理」を、片方の障害や再起動が他方に波及しない形で同居させられる |
+| リプレイ | メッセージはリテンション期間ブローカーに残る。オフセットを巻き戻せば過去分を読み直せるので、取り込み先の追加やバグ修正後の再処理がしやすい |
+| 順序保証 | メッセージキーで同じパーティションに寄せたイベントは、その中で順序が保たれる。今回は `device_id` をキーにして同一デバイスのイベント順序を守る |
+| ストリーム処理エコシステム | Kafka Connect / Kafka Streams / Flink / 各種コンシューマライブラリなど、Kafka前提の資産をそのまま乗せられる。既存のKafka基盤があれば相乗りできる |
+
+一方で、次のようなデメリットもあります。
+
+| デメリット | 内容 |
+| --- | --- |
+| 運用コスト | ブローカーが立っているあいだ課金され続ける。最小構成(`kafka.t3.small` ×3 + NAT Gateway + MSK Connect)でも概算 $5/日。Firehoseの従量課金とは性格が違う |
+| VPCが必要 | MSKはVPC内リソース。IoT Rule・MSK Connectの双方にVPC経由の接続と、サブネット / セキュリティグループ /(場合により)NAT Gatewayの設計が要る |
+| 認証設計 | コンポーネントによって使える認証方式が違い、1方式に統一できない(後述) |
+
+メリット・デメリットを考慮した上で、どちらの方式を採用するか検討すると良いでしょう。
 
 ## 構築
 
@@ -152,10 +142,6 @@ resource "aws_msk_cluster" "this" {
 
 認証を1方式に統一できないのは、コンポーネントによって使える方式が違うためです。
 
-- IoT Rule の Kafka Action はIAM認証に非対応です。
-  SASL_SSL(`SCRAM-SHA-512` など)かmTLSを使います。
-- MSK Connect はクラスタ認証としてIAM(または認証なし)しか受け付けません。
-
 | コンポーネント | MSKへの接続 |
 | --- | --- |
 | IoT Rule(Kafka Action) | SASL_SSL / SCRAM-SHA-512(9096) |
@@ -190,16 +176,16 @@ resource "aws_msk_scram_secret_association" "this" {
 ```
 
 `recovery_window_in_days = 0` は、デフォルトの30日だと `terraform destroy` 後に同名シークレットを再作成できず `apply` し直せなくなるためです。
+
+:::message
 ここまでのリソースを `terraform apply` します。
 MSKクラスタの作成には20〜40分かかります(実測で28分でした)。
+:::
 
 #### トピック設計
 
-クラスタができたら、トピックを自動作成に頼らず明示的に作成します(VPC内から到達できるKafkaクライアントで、SASL/SCRAM接続)。
-
-- トピック名: `env-sensor-telemetry`
-- パーティション数: 3 / レプリケーションファクタ: 3 / `min.insync.replicas`: 2
-- メッセージキー: `device_id`(IoT Rule側で `key = "${topic(2)}"`)
+クラスタができたら、トピックを自動作成に頼らず明示的に作成します。
+VPC内から到達できるKafkaクライアントで、SASL/SCRAM接続しています。
 
 ```
 $ kafka-topics.sh --bootstrap-server "$BS" --command-config client.properties \
@@ -208,7 +194,8 @@ $ kafka-topics.sh --bootstrap-server "$BS" --command-config client.properties \
 Created topic env-sensor-telemetry.
 ```
 
-`client.properties` は SASL_SSL / SCRAM-SHA-512 の設定です(TLS truststoreはJVMデフォルトでOK。MSKの証明書はAmazon Trust Services)。
+`client.properties` は SASL_SSL / SCRAM-SHA-512 の設定です。
+TLS truststoreはJVMデフォルトでOK、MSKの証明書はAmazon Trust Servicesを利用します。　
 
 ```properties:client.properties
 security.protocol=SASL_SSL
@@ -219,7 +206,7 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
 ### AWS IoT CoreからAmazon MSKへデータを転送
 
 IoT Ruleの Kafka Action で、受信メッセージをMSKトピックへ直接produceします。
-MSKはVPC内リソースなので、まず Topic Rule Destination(VPC destination) を作ります。
+まず Topic Rule Destination(VPC destination) を作ります。
 指定サブネットにIoTルールエンジンがENIを張り、ブローカーへ接続します。
 
 ```hcl:terraform/kafka/iot_kafka.tf(抜粋)
@@ -236,8 +223,6 @@ resource "aws_iot_topic_rule_destination" "kafka" {
 ルールエンジンがassumeするIAMロールには、ENI管理系(`ec2:CreateNetworkInterface` ほか)と、`get_secret()` で使う `secretsmanager:GetSecretValue` / `DescribeSecret`、SCRAM用CMKの `kms:Decrypt` が必要です。
 
 ルール本体のSQLは前回のFirehoseルールと同じです。
-`timestamp()` でUnix時間(ミリ秒)、`topic()` でMQTTトピックからデバイスIDを抜き出して付加します。
-デバイスは `env-sensor/<チップID>` 宛にpublishするので `topic(2)` がチップIDです。
 
 ```hcl:terraform/kafka/iot_kafka.tf(抜粋)
 resource "aws_iot_topic_rule" "env_sensor_to_kafka" {
@@ -271,11 +256,15 @@ resource "aws_iot_topic_rule" "env_sensor_to_kafka" {
 
 :::message
 AWS IoT SQLの `topic(n)` は1始まりです。
-トピック `env-sensor/ABCD1234` なら `topic(1)` が `"env-sensor"`、`topic(2)` が `"ABCD1234"` です。
-`key.serializer` は `StringSerializer`、`value.serializer` は `ByteBufferSerializer` のみ対応です。
+トピック `env-sensor/ABCD1234` なら `topic(1)` が `"env-sensor"`、`topic(2)` が `"ABCD1234"` となります。
+
+また、`key.serializer` における `StringSerializer`、`value.serializer` は `ByteBufferSerializer` のみ対応です。
 :::
 
-`apply` すると、VPC destinationが `ENABLED` になるまで数分かかります(実測で約3分。ENIを各サブネットに作成しています)。
+:::message
+ここまでの内容を `terraform apply` すると、VPC destinationが `ENABLED` になるまで数分かかります
+実測で約3分。ENIを各サブネットに作成しています。
+:::
 
 ### MSK Connect + Snowflake Connectorの準備
 
@@ -304,7 +293,8 @@ resource "aws_route" "private_default" {
 
 #### Snowflake側のオブジェクト
 
-前回の `snowflake.tf` と同じ作り方で、この構成専用の DB / schema / role / キーペア認証ユーザー / テーブルを作ります(前回の `IOT_STREAM_IOT_DB` とは別DBです)。
+前回の `snowflake.tf` と同じ作り方で、この構成専用の DB / schema / role / キーペア認証ユーザー / テーブルを作ります。
+前回の `IOT_STREAM_IOT_DB` とは別DBです。
 
 テーブルはPreview機能の `snowflake_table` を避け、Stableな `snowflake_execute` で作ります。
 カラムは前回と同じ型付き5列に、Snowflake Kafka Connectorが付けるメタデータ列 `RECORD_METADATA` を足したものです。
@@ -380,7 +370,10 @@ resource "aws_mskconnect_connector" "snowflake" {
 }
 ```
 
-`apply` するとコネクタ作成に5〜15分かかります(実測で約4分)。
+:::message
+`terraform apply` するとコネクタ作成に5〜15分かかります(実測で約4分)。
+:::
+
 作成後 `describe-connector` で `RUNNING` になり、CloudWatch Logsに `Successfully called PRECOMMIT on all 3 partitions` などが出てくれば取り込みが動いています。
 
 `schematization = false` だとJSONを分解せず `RECORD_METADATA` + `RECORD_CONTENT`(VARIANT)で格納されます。
@@ -488,11 +481,11 @@ PARTITION  OFFSET  DEVICE_ID     EVENT_TIMESTAMP
 
 ATOMS3 Liteで計測したデータを、AWS IoT Core → Amazon MSK → Snowflake の経路でTerraformだけで構築し、前回のFirehose版と比較しました。
 
-- レイテンシはウォーム時でむしろやや速い〜同等(event_timestamp基準で3〜4秒台)。
-  ただしコネクタのアイドル明け初回に十数秒のスパイクが出る。
-- 順序保証は `device_id` をメッセージキーにすることでKafka・Snowflakeの両方で担保できた。
-- ファンアウトを前提にできる。
-  同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理(リアルタイム集計など)を足せる。
+| 観点 | 結果 |
+| --- | --- |
+| レイテンシ | ウォーム時でむしろやや速い〜同等(event_timestamp基準で3〜4秒台)。ただしコネクタのアイドル明け初回に十数秒のスパイクが出る |
+| 順序保証 | `device_id` をメッセージキーにすることで、Kafka・Snowflakeの両方で担保できた |
+| ファンアウト | 同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理(リアルタイム集計など)を足せる |
 
 一方で、Kafka版はVPC・MSK・NAT・MSK Connect・認証設計と構成要素が増えます。
 認証方式もIoT RuleはSASL/SCRAM、MSK ConnectはIAMと分かれ、クラスタ側で両方を有効化しました。

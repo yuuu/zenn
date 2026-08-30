@@ -49,7 +49,7 @@ Firehose直結に対して、あいだにKafkaを置くと以下が得られま�
 
 ## 全体構成
 
-<!-- TODO: 構成図(aws-snowflake-kafka.png) -->
+![構成図](/images/iot-kafka-snowflake-procedure/architecture.png)
 
 ```
 ATOMS3 Lite + ENV III

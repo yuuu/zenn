@@ -20,7 +20,9 @@ publication_name: "fusic"
 
 このとき、AWS IoT Coreが受け取ったメッセージをMSKのトピック `env-sensor-telemetry` へ流し、MSK Connect + Snowflake Kafka Connector(コンシューマグループ `connect-snowflake-env-sensor-sink`)でSnowflakeへ蓄積しました。
 
-Kafkaを挟む利点のひとつがファンアウトです。同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理を足せます。片方の障害や再起動は他方に影響しません。
+Kafkaを挟む利点のひとつがファンアウトです。
+同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理を足せます。
+片方の障害や再起動は他方に影響しません。
 
 この記事では、Ruby製のKafkaフレームワーク [Karafka](https://karafka.io/) で「ダッシュボード用の簡易コンシューマ」を書き、MSK Connectと並んで同じトピックを購読します。
 
@@ -34,7 +36,8 @@ https://github.com/yuuu/stream-iot-data-to-snowflake
 - Ruby実行環境(検証時は Ruby 4.x + Bundler)
 - Karafka用のSASL/SCRAMユーザー `AmazonMSK_env-sensor_karafka` がクラスタに登録済みであること
   - `terraform/kafka/` の `scram_users` に `karafka` を含めておけば `aws_msk_scram_secret_association` まで作られます
-- MSKはVPC内リソースなので、ローカルから接続するにはVPC内へ到達できる経路が必要です。前回立てた踏み台EC2へのSSHポートフォワードを使います
+- MSKはVPC内リソースなので、ローカルから接続するにはVPC内へ到達できる経路が必要です。
+  前回立てた踏み台EC2へのSSHポートフォワードを使います
 
 ## Karafka プロジェクト
 
@@ -47,7 +50,8 @@ gem "karafka", "~> 2.4"
 gem "dotenv", "~> 3.1" # 認証情報は .env(gitignore)から読む
 ```
 
-MSKへの接続設定と、コンシューマグループ・ルーティングを `karafka.rb` に書きます。コンシューマグループIDを MSK Connect の `connect-*` と別にするのがファンアウトの肝です。
+MSKへの接続設定と、コンシューマグループ・ルーティングを `karafka.rb` に書きます。
+コンシューマグループIDを MSK Connect の `connect-*` と別にするのがファンアウトの肝です。
 
 ```ruby:karafka/karafka.rb(抜粋)
 class KarafkaApp < Karafka::App
@@ -91,7 +95,8 @@ class EnvSensorConsumer < Karafka::BaseConsumer
 end
 ```
 
-SASL/SCRAMの認証情報は `AmazonMSK_env-sensor_karafka` シークレットから取り出して `.env`(gitignore対象)へ書き込みます。リポジトリの `bin/load-secret.sh` が行います。
+SASL/SCRAMの認証情報は `AmazonMSK_env-sensor_karafka` シークレットから取り出して `.env`(gitignore対象)へ書き込みます。
+リポジトリの `bin/load-secret.sh` が行います。
 
 ```bash
 cd karafka
@@ -105,7 +110,10 @@ bundle exec karafka server
 
 ## ローカルからMSKへ届かせる(SSHポートフォワード)
 
-MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。クライアントは最初の接続後、広告されたFQDNで各ブローカーへ繋ぎ直すため、`ssh -L 9096:b-1...:9096` を1本張るだけでは足りません。ブローカーの数だけローカルアドレスを用意して各9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスへ向けます。macOSなら以下の要領です(いずれも `sudo` が必要)。
+MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。
+クライアントは最初の接続後、広告されたFQDNで各ブローカーへ繋ぎ直すため、`ssh -L 9096:b-1...:9096` を1本張るだけでは足りません。
+ブローカーの数だけローカルアドレスを用意して各9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスへ向けます。
+macOSなら以下の要領です(いずれも `sudo` が必要)。
 
 ```bash
 # ループバックエイリアスを3つ足す
@@ -129,7 +137,10 @@ ssh -i terraform/kafka/certs/bastion_ed25519.pem -N \
 リポジトリの `terraform/kafka/scripts/lo-setup.sh` / `lo-teardown.sh` が、この `/etc/hosts` 追記とループバックエイリアスの出し入れを行います(ブローカーFQDNは引数、または `terraform output` から取得)。
 
 :::message
-JDK 24以降ではSecurity Managerが撤廃され、Kafkaクライアント(JVM実装)のSASL認証が `getSubject is not supported` で失敗します。ローカルでJVM版の `kafka-console-consumer` などを使う場合はJDK 17系を使ってください。Karafkaはlibrdkafka(C実装)なので、この問題の影響を受けません。上記のトンネル経由でそのまま動きます。
+JDK 24以降ではSecurity Managerが撤廃され、Kafkaクライアント(JVM実装)のSASL認証が `getSubject is not supported` で失敗します。
+ローカルでJVM版の `kafka-console-consumer` などを使う場合はJDK 17系を使ってください。
+Karafkaはlibrdkafka(C実装)なので、この問題の影響を受けません。
+上記のトンネル経由でそのまま動きます。
 :::
 
 ## ファンアウトを確認する

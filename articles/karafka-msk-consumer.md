@@ -14,7 +14,7 @@ publication_name: "fusic"
 
 ## はじめに
 
-前回の記事で、M5Stack + ENV3ユニットで計測した温度・湿度・気圧データを、AWS IoT Core → Amazon MSK → Snowflake の経路でTerraformで構築しました。
+前回の記事で、M5Stack + ENV Ⅲ ユニットで計測した温度・湿度・気圧データを、AWS IoT Core → Amazon MSK → Snowflake の経路でTerraformで構築しました。
 
 <!-- TODO: 前回記事(MSK版)の公開後にURLを差し込む -->
 

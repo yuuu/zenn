@@ -14,7 +14,7 @@ publication_name: "fusic"
 
 ## はじめに
 
-以前の記事で、M5Stack + ENV3ユニットで計測した温度・湿度・気圧データを、AWS IoT Core → Kinesis Data Firehose → Snowpipe Streaming経由でSnowflakeへ蓄積する仕組みを構築しました。
+以前の記事で、M5Stack + ENV Ⅲ ユニットで計測した温度・湿度・気圧データを、AWS IoT Core → Amazon Data Firehose → Snowpipe Streaming経由でSnowflakeへ蓄積する仕組みを構築しました。
 
 https://zenn.dev/fusic/articles/stream-iot-data-to-snowflake
 
@@ -111,7 +111,7 @@ resource "aws_vpc" "this" {
 
 #### MSKクラスタと認証方式
 
-`kafka.t3.small` を3AZに1台ずつ、通信はTLS、クライアント認証は SASL/SCRAM と IAM の両方 を有効にします。
+`kafka.t3.small` を3AZに1台ずつ、通信はTLS、クライアント認証は SASL/SCRAM と IAM の両方を有効にします。
 
 ```hcl:terraform/kafka/msk.tf(抜粋)
 resource "aws_msk_cluster" "this" {
@@ -195,7 +195,7 @@ Created topic env-sensor-telemetry.
 ```
 
 `client.properties` は SASL_SSL / SCRAM-SHA-512 の設定です。
-TLS truststoreはJVMデフォルトでOK、MSKの証明書はAmazon Trust Servicesを利用します。　
+TLS truststoreはJVMデフォルトでOK、MSKの証明書はAmazon Trust Servicesを利用します。
 
 ```properties:client.properties
 security.protocol=SASL_SSL
@@ -206,7 +206,7 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
 ### AWS IoT CoreからAmazon MSKへデータを転送
 
 IoT Ruleの Kafka Action で、受信メッセージをMSKトピックへ直接produceします。
-まず Topic Rule Destination(VPC destination) を作ります。
+まず Topic Rule Destination(VPC destination)を作ります。
 指定サブネットにIoTルールエンジンがENIを張り、ブローカーへ接続します。
 
 ```hcl:terraform/kafka/iot_kafka.tf(抜粋)
@@ -258,12 +258,12 @@ resource "aws_iot_topic_rule" "env_sensor_to_kafka" {
 AWS IoT SQLの `topic(n)` は1始まりです。
 トピック `env-sensor/ABCD1234` なら `topic(1)` が `"env-sensor"`、`topic(2)` が `"ABCD1234"` となります。
 
-また、`key.serializer` における `StringSerializer`、`value.serializer` は `ByteBufferSerializer` のみ対応です。
+また、`key.serializer` は `StringSerializer` のみ、`value.serializer` は `ByteBufferSerializer` のみ対応しています。
 :::
 
 :::message
-ここまでの内容を `terraform apply` すると、VPC destinationが `ENABLED` になるまで数分かかります
-実測で約3分。ENIを各サブネットに作成しています。
+ここまでの内容を `terraform apply` すると、VPC destinationが `ENABLED` になるまで数分かかります。
+実測で約3分、ENIを各サブネットに作成しています。
 :::
 
 ### MSK Connect + Snowflake Connectorの準備
@@ -436,7 +436,7 @@ TESTKAFKA001  1          5       TESTKAFKA001  24.9         1788040555321
 #### レイテンシ(前回のFirehose版との比較)
 
 MSK Connect + Snowflake Kafka Connector(`SNOWPIPE_STREAMING` / `max.client.lag=1`)で、`aws iot-data publish` してからSnowflakeでクエリできるようになるまでを実測しました(2秒間隔ポーリング、5回)。
-前回のFirehose版は `DeliveryToSnowflake.DataFreshness` が 8秒です。
+前回のFirehose版は `DeliveryToSnowflake.DataFreshness` が8秒です。
 
 | 計測 | publish → クエリ可能(e2e) | event_timestamp → クエリ可能 |
 | --- | --- | --- |

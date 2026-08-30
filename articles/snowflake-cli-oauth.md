@@ -172,10 +172,12 @@ snow connection set-default {コネクション名}
 https://github.com/snowflakedb/snowflake-cli/issues/3152
 
 :::message
-## 2026-08-07 追記
+## 2026-08-31 追記
 
 上記Issueをきっかけに `--server-session-keep-alive` オプションが追加されたようです。
 `v3.25.0` 以降は次のようなコマンドで、何度もブラウザを開くことなくOAuth認証できるようになります。
+
+https://github.com/snowflakedb/snowflake-cli/releases/tag/v3.25.0
 
 ```sh
 $ snow connection add \

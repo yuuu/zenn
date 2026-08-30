@@ -105,9 +105,7 @@ bundle exec karafka server
 
 ## ローカルからMSKへ届かせる(SSHポートフォワード)
 
-ここが少し手間です。MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。クライアントは最初のブローカーに繋いだあと、広告されたFQDNで各ブローカーへ繋ぎ直します。
-
-そのため `ssh -L 9096:b-1...:9096` を1本張るだけでは足りません。ブローカーの数だけローカルアドレスを用意して各9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスへ向けます。macOSなら以下の要領です(いずれも `sudo` が必要)。
+MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。クライアントは最初の接続後、広告されたFQDNで各ブローカーへ繋ぎ直すため、`ssh -L 9096:b-1...:9096` を1本張るだけでは足りません。ブローカーの数だけローカルアドレスを用意して各9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスへ向けます。macOSなら以下の要領です(いずれも `sudo` が必要)。
 
 ```bash
 # ループバックエイリアスを3つ足す
@@ -155,7 +153,7 @@ Karafkaのログに出ますし、同時にSnowflakeにも行が増えます。
 [recv] p0 o5   device_id=FANOUT003 temp=17.3 event_ts=1788073912641
 ```
 
-踏み台から `kafka-consumer-groups.sh --describe` で両グループのオフセットを見ると、独立して管理されています。
+踏み台から `kafka-consumer-groups.sh --describe` で両グループのオフセットを見ます。
 
 ```
 GROUP                              P  CURRENT-OFFSET  LOG-END-OFFSET  LAG

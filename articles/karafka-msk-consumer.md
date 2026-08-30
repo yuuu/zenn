@@ -20,9 +20,9 @@ publication_name: "fusic"
 
 このとき、AWS IoT Coreが受け取ったメッセージをMSKのトピック `env-sensor-telemetry` へ流し、MSK Connect + Snowflake Kafka Connector(コンシューマグループ `connect-snowflake-env-sensor-sink`)でSnowflakeへ蓄積しました。
 
-Kafkaを挟む利点のひとつがファンアウトです。同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理を足せます。片方の障害や再起動は他方に影響しません。
+Kafkaを挟む利点のひとつがファンアウトです。同じトピックを別のコンシューマグループから購読すれば、Snowflakeへの蓄積とは独立した処理を足せます。片方の障害や再起動は、もう片方に影響しません。
 
-この記事では、Ruby製のKafkaフレームワーク [Karafka](https://karafka.io/) で「ダッシュボード用の簡易コンシューマ」を書き、MSK Connectと並んで同じトピックを購読します。
+この記事では、Ruby製のKafkaフレームワーク [Karafka](https://karafka.io/) で「ダッシュボード用の簡易コンシューマ」を書き、MSK Connectと並んで同じトピックを購読するところまでを確認します。
 
 コードは前回と同じリポジトリの `karafka/` にあります。
 
@@ -74,7 +74,7 @@ class KarafkaApp < Karafka::App
 end
 ```
 
-コンシューマは受信JSONをパースして1件ずつログ出力し、`device_id` 別の件数と最新値をメモリに集計するだけの簡易実装です(ダッシュボードの入り口のイメージ)。
+コンシューマは、受信したJSONをパースして1件ごとにログ出力し、`device_id` 別の件数と最新値をメモリに集計する、というだけの簡易実装です(「ダッシュボードの入り口」のイメージ)。
 
 ```ruby:karafka/app/consumers/env_sensor_consumer.rb(抜粋)
 class EnvSensorConsumer < Karafka::BaseConsumer
@@ -91,7 +91,7 @@ class EnvSensorConsumer < Karafka::BaseConsumer
 end
 ```
 
-SASL/SCRAMの認証情報は `AmazonMSK_env-sensor_karafka` シークレットから取り出して `.env`(gitignore対象)へ書き込みます。リポジトリの `bin/load-secret.sh` が行います。
+SASL/SCRAMの認証情報は `AmazonMSK_env-sensor_karafka` シークレットから取り出して `.env`(gitignore対象)へ書き込みます。リポジトリの `bin/load-secret.sh` がこれをやります。
 
 ```bash
 cd karafka
@@ -105,7 +105,9 @@ bundle exec karafka server
 
 ## ローカルからMSKへ届かせる(SSHポートフォワード)
 
-MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。クライアントは最初の接続後、広告されたFQDNで各ブローカーへ繋ぎ直すため、`ssh -L 9096:b-1...:9096` を1本張るだけでは足りません。ブローカーの数だけローカルアドレスを用意して各9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスへ向けます。macOSなら以下の要領です(いずれも `sudo` が必要)。
+ここが少し手間です。MSKはVPC内にあり、ブローカーは自分をFQDNで広告します(`b-1.envsensorkafka....amazonaws.com:9096` など)。クライアントは最初のブローカーに繋いだあと、広告されたFQDNで各ブローカーへ繋ぎ直します。
+
+そのため、単純に `ssh -L 9096:b-1...:9096` と1本張るだけでは足りず、ブローカーの数だけ別々のローカルアドレスを用意して、それぞれの9096をポートフォワードし、`/etc/hosts` で各FQDNをそのアドレスに向ける必要があります。macOSなら以下の要領です(いずれも `sudo` が必要)。
 
 ```bash
 # ループバックエイリアスを3つ足す
@@ -126,7 +128,7 @@ ssh -i terraform/kafka/certs/bastion_ed25519.pem -N \
   ec2-user@<bastion-ip>
 ```
 
-リポジトリの `terraform/kafka/scripts/lo-setup.sh` / `lo-teardown.sh` が、この `/etc/hosts` 追記とループバックエイリアスの出し入れを行います(ブローカーFQDNは引数、または `terraform output` から取得)。
+リポジトリの `terraform/kafka/scripts/lo-setup.sh` / `lo-teardown.sh` が、この `/etc/hosts` 追記とループバックエイリアスの出し入れをやります(ブローカーFQDNは引数、または `terraform output` から取得)。
 
 :::message
 JDK 24以降ではSecurity Managerが撤廃され、Kafkaクライアント(JVM実装)のSASL認証が `getSubject is not supported` で失敗します。ローカルでJVM版の `kafka-console-consumer` などを使う場合はJDK 17系を使ってください。Karafkaはlibrdkafka(C実装)なので、この問題の影響を受けません。上記のトンネル経由でそのまま動きます。
@@ -153,7 +155,7 @@ Karafkaのログに出ますし、同時にSnowflakeにも行が増えます。
 [recv] p0 o5   device_id=FANOUT003 temp=17.3 event_ts=1788073912641
 ```
 
-踏み台から `kafka-consumer-groups.sh --describe` で両グループのオフセットを見ます。
+踏み台から `kafka-consumer-groups.sh --describe` で両グループのオフセットを見ると、独立して管理されているのがわかります。
 
 ```
 GROUP                              P  CURRENT-OFFSET  LOG-END-OFFSET  LAG
@@ -165,7 +167,7 @@ connect-snowflake-env-sensor-sink  1  534             534             0
 connect-snowflake-env-sensor-sink  2  2               2               0
 ```
 
-`dashboard-consumer-group`(Karafka)と `connect-snowflake-env-sensor-sink`(MSK Connect)が、同じ `env-sensor-telemetry` を別々の `__consumer_offsets` エントリでオフセット管理しています。
+同じ `env-sensor-telemetry` を、`dashboard-consumer-group`(Karafka)と `connect-snowflake-env-sensor-sink`(MSK Connect)が、別々の `__consumer_offsets` エントリでオフセットを管理しています。
 
 ## おわりに
 

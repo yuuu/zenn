@@ -14,7 +14,9 @@ publication_name: "fusic"
 
 ## はじめに
 
-Snowflakeに自室の環境センサーの測定値を計測しはじめて1ヶ月が経過しました。
+Snowflakeに自室の環境センサーの測定値を蓄積しはじめて1ヶ月が経過しました。
+
+https://zenn.dev/fusic/articles/stream-iot-data-to-snowflake
 
 これまで溜まったデータはSnowsightでSQLを実行することで確認していたのですが、SQLを実行するのは毎回手間ですし、データの量が増えたことでなかなかグラフが描画されないといった課題が顕在化してきました。
 
@@ -26,15 +28,17 @@ Snowflakeにデータを蓄積すれば可視化まで一気通貫で実現で�
 
 https://www.metabase.com/
 
+最終的に次のようなIoTダッシュボードが完成しました。
+
 ![](/images/snowflake-metabase-iot-dashboard/013.png)
 
 ## 事前準備
 
 MetabaseからSnowflakeに接続するための準備をします。
 
-### 認証用のRSA private key
+### 認証用のRSA秘密鍵
 
-次のコマンドを実行し、RSA private keyを生成し、Snowflakeに公開鍵を設定しておきます。
+次のコマンドで秘密鍵を生成し、Snowflakeに公開鍵を登録しておきます。
 
 ```sh
 # 秘密鍵の生成（パスフレーズなし）
@@ -55,7 +59,7 @@ MetabaseのSnowflakeコネクタは、パスフレーズ付きの秘密鍵に対
 上記のように `-nocrypt` を付けて、パスフレーズなしで秘密鍵を生成してください。
 :::
 
-## ウェアハウスの起動
+### ウェアハウスの起動
 
 Snowflakeにおける計算リソースであるウェアハウスを事前に起動しておきます。
 
@@ -164,4 +168,4 @@ docker run -d -p 3000:3000 --name metabase metabase/metabase
 手元のPCでデータを集計・可視化するだけであれば十分有用であると感じました。
 
 ダッシュボードを他のユーザーと共有したくなった場合にはMetabaseをクラウドでホスティングすることを考える必要がありそうです。
-この点についてもいずれ調べてみたいと思いました。
+この点についてもいずれ調べてみたいと思います。

@@ -88,12 +88,11 @@ snow sql -q "SHOW DATABASES;" -c your_existing_connection
 Metabaseを手元のPCで立ち上げます。
 構築にはDockerイメージを活用すると便利です。
 
-
 [公式ドキュメント](https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker) を参考にコマンドを実行します。
 
 ```sh
 docker pull metabase/metabase:latest
-docker run -d -p 3000:3000 --name metabase metabase/metabase
+docker run -d -p 3000:3000 --name metabase metabase/metabase:latest
 ```
 
 コンテナが立ち上がったら http://localhost:3000 にアクセスしてみましょう。
@@ -161,6 +160,24 @@ docker run -d -p 3000:3000 --name metabase metabase/metabase
 いろいろなグラフや値を準備しそれを集めると冒頭のようなダッシュボードも作成できます。
 
 ![](/images/snowflake-metabase-iot-dashboard/013.png)
+
+## クリーンアップ
+
+検証が終わったら、作成したリソースを片付けておきます。
+`AUTO_SUSPEND = 60` を設定しているためウェアハウスの課金は最小限に抑えられますが、不要になったものは削除しておくと安心です。
+
+```sh
+# ウェアハウスの削除
+snow sql -q "DROP WAREHOUSE IF EXISTS demo_wh;" -c your_existing_connection
+
+# 登録した公開鍵の削除
+snow sql -q "ALTER USER your_username UNSET RSA_PUBLIC_KEY;" -c your_existing_connection
+```
+
+```sh
+# Metabaseコンテナの停止・削除
+docker rm -f metabase
+```
 
 ## おわりに
 

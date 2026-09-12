@@ -1,5 +1,5 @@
 ---
-title: "Snowflake CLIをmiseでインストールする"
+title: "Snowflake CLIもmiseで管理したい！pipxバックエンドでインストールする"
 emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:

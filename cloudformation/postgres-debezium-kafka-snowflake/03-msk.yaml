@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  検証用 Amazon MSK(Provisioned)。認証はIAMのみ(Debezium / Snowflake両コネクタともMSK Connect経由でIAM認証を使うため)。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: pg-cdc
+
+  ClusterName:
+    Type: String
+    Default: pg-cdc-kafka
+
+  KafkaVersion:
+    Type: String
+    Default: "3.8.x"
+
+  BrokerInstanceType:
+    Type: String
+    Default: kafka.t3.small
+
+  EbsVolumeSize:
+    Type: Number
+    Default: 10
+
+Resources:
+  MskCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      KafkaVersion: !Ref KafkaVersion
+      NumberOfBrokerNodes: 3
+      BrokerNodeGroupInfo:
+        InstanceType: !Ref BrokerInstanceType
+        ClientSubnets:
+          - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet0Id"
+          - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet1Id"
+          - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet2Id"
+        SecurityGroups:
+          - Fn::ImportValue: !Sub "${ProjectName}-MskSecurityGroupId"
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: !Ref EbsVolumeSize
+      EncryptionInfo:
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
+      ClientAuthentication:
+        Sasl:
+          Iam:
+            Enabled: true
+      EnhancedMonitoring: DEFAULT
+
+Outputs:
+  ClusterArn:
+    Value: !Ref MskCluster
+    Export:
+      Name: !Sub "${ProjectName}-MskClusterArn"
+  BootstrapBrokerStringSaslIam:
+    Value: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+    Export:
+      Name: !Sub "${ProjectName}-MskBootstrapSaslIam"

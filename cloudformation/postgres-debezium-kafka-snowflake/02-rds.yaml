@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  検証用 RDS for PostgreSQL(論理レプリケーション有効化済み)。01-network.yamlをデプロイ済みであることが前提。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: pg-cdc
+
+  DBInstanceIdentifier:
+    Type: String
+    Default: pg-cdc-source
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+
+  AllocatedStorage:
+    Type: Number
+    Default: 20
+
+  EngineVersion:
+    Type: String
+    Default: "16.4"
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  MasterUsername:
+    Type: String
+    Default: postgres
+
+Resources:
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres16
+      Description: !Sub "${ProjectName}: enable logical replication for Debezium"
+      Parameters:
+        rds.logical_replication: "1"
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} subnet group"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet0Id"
+        - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnet2Id"
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceIdentifier
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref AllocatedStorage
+      StorageType: gp3
+      DBName: !Ref DBName
+      MasterUsername: !Ref MasterUsername
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${ProjectName}-RdsSecurityGroupId"
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+
+Outputs:
+  DBInstanceEndpointAddress:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${ProjectName}-DBEndpointAddress"
+  DBInstanceEndpointPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${ProjectName}-DBEndpointPort"
+  MasterUserSecretArn:
+    Value: !GetAtt DBInstance.MasterUserSecret.SecretArn
+    Description: "マスターパスワードが入ったSecrets ManagerシークレットARN(RDSが自動作成)"
+    Export:
+      Name: !Sub "${ProjectName}-DBMasterUserSecretArn"

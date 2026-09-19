@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MSK Connectのカスタムプラグイン登録。04-mskconnect-bucket.yamlのバケットへ
+  debezium-connector-postgres.zip / snowflake-kafka-connector.zip を
+  `aws s3 cp` でアップロード済みであることが前提(CustomPluginはオブジェクト実在を作成時に検証するため)。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: pg-cdc
+
+  DebeziumPluginKey:
+    Type: String
+    Default: debezium-connector-postgres.zip
+
+  SnowflakePluginKey:
+    Type: String
+    Default: snowflake-kafka-connector.zip
+
+Resources:
+  DebeziumPlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    Properties:
+      Name: !Sub "${ProjectName}-debezium-postgres-connector"
+      ContentType: ZIP
+      Description: "Debezium PostgreSQL Connector"
+      Location:
+        S3Location:
+          BucketArn:
+            Fn::ImportValue: !Sub "${ProjectName}-PluginBucketArn"
+          FileKey: !Ref DebeziumPluginKey
+
+  SnowflakePlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    Properties:
+      Name: !Sub "${ProjectName}-snowflake-kafka-connector"
+      ContentType: ZIP
+      Description: "Snowflake Connector for Kafka"
+      Location:
+        S3Location:
+          BucketArn:
+            Fn::ImportValue: !Sub "${ProjectName}-PluginBucketArn"
+          FileKey: !Ref SnowflakePluginKey
+
+Outputs:
+  DebeziumPluginArn:
+    Value: !Ref DebeziumPlugin
+    Export:
+      Name: !Sub "${ProjectName}-DebeziumPluginArn"
+  DebeziumPluginRevision:
+    Value: !GetAtt DebeziumPlugin.Revision
+    Export:
+      Name: !Sub "${ProjectName}-DebeziumPluginRevision"
+  SnowflakePluginArn:
+    Value: !Ref SnowflakePlugin
+    Export:
+      Name: !Sub "${ProjectName}-SnowflakePluginArn"
+  SnowflakePluginRevision:
+    Value: !GetAtt SnowflakePlugin.Revision
+    Export:
+      Name: !Sub "${ProjectName}-SnowflakePluginRevision"

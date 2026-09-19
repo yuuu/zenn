@@ -33,21 +33,14 @@ Debezium経由でKafkaへ転送している事例をよく見かけるので、�
 
 実際に構築した後の実行結果・詰まった点は、別記事(実践編)としてまとめる予定です。
 
-検証用のAWS環境はCloudFormationテンプレートとして用意し、`aws cloudformation deploy`で適用する形にしました。手作業のCLIコマンドを積み上げるのではなく、テンプレートを見れば構成が分かる・壊れたら`describe-stacks`で状態を追える・不要になったら`delete-stack`で綺麗に消せる、という状態を保つのが狙いです。
-テンプレート一式はリポジトリの`cloudformation/postgres-debezium-kafka-snowflake/`にあります。
+検証用のAWS環境はCloudFormationテンプレートとして用意し、`aws cloudformation deploy`で適用する形にしました。わかりやすさを優先して**1ファイル・1スタック**構成にしています。作業開始時点ではVPCとRDSまでを記述したテンプレートを用意しておき、そこにMSK → MSK Connectプラグイン → MSK Connectコネクタの順でセクションを追記しながら、同じスタック(`pg-cdc`)に対して`aws cloudformation deploy`を繰り返して育てていきます。
 
 ```
 cloudformation/postgres-debezium-kafka-snowflake/
-├── 01-network.yaml              # VPC / サブネット / SG / NAT / 踏み台(SSM)
-├── 02-rds.yaml                  # RDS for PostgreSQL(論理レプリケーション有効化)
-├── 03-msk.yaml                  # Amazon MSK(IAM認証のみ)
-├── 04-mskconnect-bucket.yaml    # カスタムプラグイン用S3バケット
-├── 05-mskconnect-plugins.yaml   # Debezium / Snowflakeプラグイン登録
-├── 06-mskconnect-connectors.yaml# Debezium Source / Snowflake Sink コネクタ
-└── deploy.sh                    # 適用順序のリファレンス(手動実行前提)
+└── template.yaml   # VPC/RDS/MSK/MSK Connect(プラグイン+コネクタ)を1本にまとめたテンプレート
 ```
 
-スタックは`01`→`06`の番号順に依存関係があり、`Fn::ImportValue`で前段スタックのVPC ID・サブネットID・SG ID・MSKのブートストラップサーバーなどを参照します。
+`template.yaml`はリポジトリには最終形(全リソース入り)を置いていますが、実際に手を動かす際は「そのSTEPで説明しているセクションだけを自分のファイルに書き写して`deploy`する → 動作確認する → 次のセクションを追記してまた`deploy`する」という順で進める想定です。CloudFormationのスタック更新は差分適用なので、途中でリソースを追記して再`deploy`すれば、既存分はそのままに新しいリソースだけが作成されます。
 
 ## 全体構成
 
@@ -76,10 +69,10 @@ Kafkaを挟む構成そのものは前回記事と同じ考え方です。今回
 
 ## 前提条件
 
-- AWS CLIで認証できるプロファイルがあること(VPC/RDS/MSK/MSK Connect/IAM/Secrets Managerを作成できる権限。CloudFormationスタックの作成には`CAPABILITY_NAMED_IAM`が必要な箇所があります)
+- AWS CLIで認証できるプロファイルがあること(VPC/RDS/MSK/MSK Connect/IAM/Secrets Managerを作成できる権限。IAMロールを作るため`CAPABILITY_NAMED_IAM`が必要です)
 - Snowflake CLI(`snow`)が接続済みであること(今回はDB/ウェアハウス作成権限を持つロールで接続)
 - `psql`が使えるクライアント環境(踏み台EC2 + SSM Session Managerのポートフォワード経由で接続します)
-- Kafka Connect用カスタムプラグインを作るため、`curl` / `unzip` / `zip`が使える環境
+- Kafka Connect用カスタムプラグインを作るため、`curl` / `tar` / `zip`が使える環境
 
 以降、変数は次の想定で記載します。適宜読み替えてください。
 
@@ -87,16 +80,20 @@ Kafkaを挟む構成そのものは前回記事と同じ考え方です。今回
 | --- | --- |
 | リージョン | `ap-northeast-1` |
 | VPC CIDR | `10.40.0.0/16` |
-| プロジェクト名 | `pg-cdc` |
+| プロジェクト名 / スタック名 | `pg-cdc` |
 | RDSインスタンス識別子 | `pg-cdc-source` |
 | MSKクラスタ名 | `pg-cdc-kafka` |
 | Snowflakeデータベース | `PG_CDC_DB` |
 
-## STEP1: VPCとネットワークを構築する
+## STEP1: VPC + RDSまでのテンプレートを用意する
 
-MSKと同様、RDSもVPC内リソースです。3AZにプライベートサブネット、NAT Gateway用にパブリックサブネットを1つ用意します。`01-network.yaml`で一括して作成します。
+作業開始時点でまず用意するのは、VPC(ネットワーク)とRDS for PostgreSQLの2セクションだけです。`template.yaml`は最終的にMSK・MSK Connectまで含む1ファイルに育ちますが、最初はこの範囲だけ書いて動かします。
 
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/01-network.yaml(抜粋)
+### ネットワーク(VPC / サブネット / SG / NAT / 踏み台)
+
+MSKと同様、RDSもVPC内リソースです。3AZにプライベートサブネット、NAT Gateway用にパブリックサブネットを1つ用意します。
+
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(抜粋)
 Resources:
   Vpc:
     Type: AWS::EC2::VPC
@@ -113,7 +110,7 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs ""]
 ```
 
-セキュリティグループは役割ごとに分けます。今回はMSK Connect側の2コネクタがどちらもIAM認証で接続するため、前回記事(SASL/SCRAM併用)より1本シンプルになっています。
+セキュリティグループは役割ごとに分けます。今回はMSK Connect側の2コネクタがどちらもIAM認証で接続するため、前回記事(SASL/SCRAM併用)より1本シンプルになっています(MSKを追加するSTEP3で実際に使い始めますが、SGだけ先に作っておきます)。
 
 | SG | 用途 | 主なインバウンド |
 | --- | --- | --- |
@@ -123,32 +120,20 @@ Resources:
 | `bastion-sg` | 踏み台EC2用 | インバウンドなし(SSM Session Manager経由で接続するため22番ポートを開けない) |
 
 :::message
-踏み台はSSHキーペア管理が不要なSSM Session Manager方式にしました。`01-network.yaml`の`BastionInstance`にはSSM用のIAMロールだけを付与し、セキュリティグループもインバウンドなしで作っています。接続は`aws ssm start-session --target <instance-id>`、RDS/MSKへのポートフォワードは`AWS-StartPortForwardingSessionToRemoteHost`ドキュメントを使います。
+踏み台はSSHキーペア管理が不要なSSM Session Manager方式にしました。`BastionInstance`にはSSM用のIAMロールだけを付与し、セキュリティグループもインバウンドなしで作っています。接続は`aws ssm start-session --target <instance-id>`、RDS/MSKへのポートフォワードは`AWS-StartPortForwardingSessionToRemoteHost`ドキュメントを使います。
 :::
 
 :::message
 Snowflake Kafka ConnectorはSnowflakeエンドポイントへ443でアウトバウンド接続するため、前回記事と同様にNAT Gatewayが必要です。S3はGatewayエンドポイントで通してNATを経由させません。
 :::
 
-```bash
-aws cloudformation deploy \
-  --stack-name pg-cdc-network \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/01-network.yaml \
-  --parameter-overrides ProjectName=pg-cdc \
-  --capabilities CAPABILITY_NAMED_IAM
-```
+### RDS for PostgreSQL(論理レプリケーション有効化)
 
-## STEP2: RDS for PostgreSQLを構築する
-
-### パラメータグループで論理レプリケーションを有効化
-
-`rds.logical_replication`はRDS独自のstaticパラメータで、変更するとインスタンスの再起動が必要です[^rds-logical-replication]。デフォルトのパラメータグループは変更できないため、`02-rds.yaml`でカスタムパラメータグループを作成し、インスタンス作成時から適用します(初回作成時に適用する分には、既存インスタンスへの変更と違って追加の再起動は不要です)。
+`rds.logical_replication`はRDS独自のstaticパラメータで、変更するとインスタンスの再起動が必要です[^rds-logical-replication]。デフォルトのパラメータグループは変更できないため、カスタムパラメータグループを作成し、インスタンス作成時から適用します(初回作成時に適用する分には、既存インスタンスへの変更と違って追加の再起動は不要です)。
 
 [^rds-logical-replication]: [Using logical replication with PostgreSQL on Amazon RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.FeatureSupport.LogicalReplication.html) に、`rds.logical_replication`パラメータを`1`にすると`wal_level`が自動的に`logical`になり、`max_wal_senders` / `max_replication_slots` / `max_connections`も引き上げられる旨の記載があります。
 
-### インスタンス作成
-
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/02-rds.yaml(抜粋)
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(抜粋)
 Resources:
   DBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
@@ -167,20 +152,23 @@ Resources:
       DBSubnetGroupName: !Ref DBSubnetGroup
       DBParameterGroupName: !Ref DBParameterGroup
       VPCSecurityGroups:
-        - Fn::ImportValue: !Sub "${ProjectName}-RdsSecurityGroupId"
+        - !Ref RdsSecurityGroup
       PubliclyAccessible: false
       MultiAZ: false
 ```
 
+ここまで(ネットワーク + RDS)を最初の`deploy`で作成します。
+
 ```bash
 aws cloudformation deploy \
-  --stack-name pg-cdc-rds \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/02-rds.yaml \
-  --parameter-overrides ProjectName=pg-cdc
+  --stack-name pg-cdc \
+  --template-file cloudformation/postgres-debezium-kafka-snowflake/template.yaml \
+  --parameter-overrides ProjectName=pg-cdc \
+  --capabilities CAPABILITY_NAMED_IAM
 
-DB_HOST=$(aws cloudformation describe-stacks --stack-name pg-cdc-rds \
+DB_HOST=$(aws cloudformation describe-stacks --stack-name pg-cdc \
   --query "Stacks[0].Outputs[?OutputKey=='DBInstanceEndpointAddress'].OutputValue" --output text)
-DB_MASTER_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name pg-cdc-rds \
+DB_MASTER_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name pg-cdc \
   --query "Stacks[0].Outputs[?OutputKey=='MasterUserSecretArn'].OutputValue" --output text)
 ```
 
@@ -188,10 +176,10 @@ DB_MASTER_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name pg-cdc-rd
 
 ### 論理レプリケーション用ユーザーとPublicationを作成
 
-RDSはプライベートサブネットにあるため、`01-network.yaml`で作った踏み台からSSM Session Managerのポートフォワードで接続します(SSHキーペアの管理が不要です)。
+RDSはプライベートサブネットにあるため、テンプレートで作った踏み台からSSM Session Managerのポートフォワードで接続します(SSHキーペアの管理が不要です)。
 
 ```bash
-BASTION_ID=$(aws cloudformation describe-stacks --stack-name pg-cdc-network \
+BASTION_ID=$(aws cloudformation describe-stacks --stack-name pg-cdc \
   --query "Stacks[0].Outputs[?OutputKey=='BastionInstanceId'].OutputValue" --output text)
 
 aws ssm start-session --target "$BASTION_ID" \
@@ -217,12 +205,13 @@ CREATE PUBLICATION dbz_publication FOR TABLE public.orders;
 RDSでは`rds_superuser`が実際のsuperuserではないため、`ALTER USER debezium WITH REPLICATION`ではなく`GRANT rds_replication TO debezium`を使います。
 :::
 
-## STEP3: Amazon MSKを構築する
+## STEP2: MSKをテンプレートに追記する
 
-`kafka.t3.small` ×3、TLS暗号化という基本構成は前回記事と同じですが、認証方式は**IAMのみ**にしました。今回の2コネクタ(Debezium Source / Snowflake Sink)はどちらもMSK Connect上で動きIAM認証を使えるため、前回記事のようにSASL/SCRAMを併用する理由がありません。動作確認用のkafkaクライアントも`aws-msk-iam-auth`ライブラリでIAM認証できるため、SCRAM用のKMSキー・Secrets Manager・`AmazonMSK_`プレフィックス管理を丸ごと省略できます。
+`template.yaml`に`AWS::MSK::Cluster`のセクションを追記します。`kafka.t3.small` ×3、TLS暗号化という基本構成は前回記事と同じですが、認証方式は**IAMのみ**にしました。今回の2コネクタ(Debezium Source / Snowflake Sink)はどちらもMSK Connect上で動きIAM認証を使えるため、前回記事のようにSASL/SCRAMを併用する理由がありません。動作確認用のkafkaクライアントも`aws-msk-iam-auth`ライブラリでIAM認証できるため、SCRAM用のKMSキー・Secrets Manager・`AmazonMSK_`プレフィックス管理を丸ごと省略できます。
 
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/03-msk.yaml(抜粋)
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(追記分)
 Resources:
+  # STEP1のVpc/PrivateSubnet*/RdsSecurityGroup/DBInstanceなどはそのまま
   MskCluster:
     Type: AWS::MSK::Cluster
     Properties:
@@ -231,8 +220,12 @@ Resources:
       NumberOfBrokerNodes: 3
       BrokerNodeGroupInfo:
         InstanceType: !Ref BrokerInstanceType # kafka.t3.small
-        ClientSubnets: [...]                  # 3AZ分インポート
-        SecurityGroups: [...]
+        ClientSubnets:
+          - !Ref PrivateSubnet0
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroups:
+          - !Ref MskSecurityGroup
       EncryptionInfo:
         EncryptionInTransit:
           ClientBroker: TLS
@@ -242,31 +235,69 @@ Resources:
             Enabled: true
 ```
 
+同じスタックへ再`deploy`します。既存のVPC/RDSはそのまま、MSKだけが新規作成されます。
+
 ```bash
 aws cloudformation deploy \
-  --stack-name pg-cdc-msk \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/03-msk.yaml \
-  --parameter-overrides ProjectName=pg-cdc
+  --stack-name pg-cdc \
+  --template-file cloudformation/postgres-debezium-kafka-snowflake/template.yaml \
+  --parameter-overrides ProjectName=pg-cdc \
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
 :::message
-MSKクラスタの作成には20〜40分程度かかります。`aws cloudformation deploy`はスタックが`CREATE_COMPLETE`になるまでブロックするので、そのまま待ちます。
+MSKクラスタの作成には20〜40分程度かかります。`aws cloudformation deploy`はスタックが`UPDATE_COMPLETE`になるまでブロックするので、そのまま待ちます。
 :::
 
-## STEP4: MSK Connect用カスタムプラグインを準備する
+## STEP3: MSK Connect用カスタムプラグインを追記する
 
-コネクタは2つ用意するので、プラグインも2つ用意します。プラグインの実体(ZIP)はCloudFormationでは作れない(ビルド成果物なので)ため、①S3バケットだけを`04-mskconnect-bucket.yaml`で作成 → ②`aws s3 cp`でZIPをアップロード → ③`05-mskconnect-plugins.yaml`で`AWS::KafkaConnect::CustomPlugin`を作成、という順序にしています。`CustomPlugin`はスタック作成時点でS3オブジェクトが実在することを検証するため、この順番を守る必要があります。
+コネクタは2つ用意するので、プラグインも2つ用意します。プラグインの実体(ZIP)はCloudFormationでは作れない(ビルド成果物なので)ため、①S3バケットのセクションだけ先に追記して`deploy` → ②`aws s3 cp`でZIPをアップロード → ③`AWS::KafkaConnect::CustomPlugin`のセクションを追記してもう一度`deploy`、という2段階になります。`CustomPlugin`はスタック更新時点でS3オブジェクトが実在することを検証するため、この順番を守る必要があります。
 
-```bash
-BUCKET_NAME="pg-cdc-connect-plugins-$(aws sts get-caller-identity --query Account --output text)"
+### S3バケットを追記してデプロイ
 
-aws cloudformation deploy \
-  --stack-name pg-cdc-mskconnect-bucket \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/04-mskconnect-bucket.yaml \
-  --parameter-overrides ProjectName=pg-cdc BucketName="$BUCKET_NAME"
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(追記分)
+Resources:
+  PluginBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-connect-plugins-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  PluginBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PluginBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${PluginBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
 ```
 
-### Debezium PostgreSQL Connectorプラグイン
+```bash
+aws cloudformation deploy \
+  --stack-name pg-cdc \
+  --template-file cloudformation/postgres-debezium-kafka-snowflake/template.yaml \
+  --parameter-overrides ProjectName=pg-cdc \
+  --capabilities CAPABILITY_NAMED_IAM
+
+BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name pg-cdc \
+  --query "Stacks[0].Outputs[?OutputKey=='PluginBucketName'].OutputValue" --output text)
+```
+
+### プラグインZIPをビルドしてアップロード
 
 Maven CentralからDebezium公式のプラグインアーカイブを取得します[^debezium-plugin]。MSK Connectのカスタムプラグインは**ZIP形式**が必須ですが、Debeziumの配布物は`tar.gz`なので展開して再圧縮します。
 
@@ -285,9 +316,7 @@ aws s3 cp debezium-connector-postgres.zip "s3://${BUCKET_NAME}/debezium-connecto
 
 [^debezium-plugin]: [Deploy Debezium on Kafka Connect Cluster on AWS - Debezium Documentation](https://debezium.io/documentation/reference/stable/operations/debezium-on-kubernetes.html) 系のガイドでも、AWS上のKafka Connectへは公式プラグインアーカイブをそのまま/再パッケージして配置する方式が案内されています。MSK Connectのカスタムプラグインの制約(ZIP必須)は[Amazon MSK Connect - Custom plugins](https://docs.aws.amazon.com/msk/latest/developerguide/msk-connect-plugins.html)を参照してください。
 
-### Snowflake Kafka Connectorプラグイン
-
-前回記事と同じ手順(Maven Centralからfat jarを取得しS3経由で登録)です。
+Snowflake Kafka Connectorも同様に、前回記事と同じ手順(Maven Centralからfat jarを取得しS3経由で登録)です。
 
 ```bash
 SNOWFLAKE_CONNECTOR_VERSION=3.2.2
@@ -302,11 +331,11 @@ cp snowflake-kafka-connector.jar build/snowflake-kafka-connector/
 aws s3 cp snowflake-kafka-connector.zip "s3://${BUCKET_NAME}/snowflake-kafka-connector.zip"
 ```
 
-### カスタムプラグインの登録
+### カスタムプラグインのセクションを追記してデプロイ
 
-ZIPのアップロードが終わったら、`05-mskconnect-plugins.yaml`で2つの`AWS::KafkaConnect::CustomPlugin`をまとめて登録します。
+ZIPのアップロードが終わったら、`template.yaml`に2つの`AWS::KafkaConnect::CustomPlugin`を追記します。
 
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/05-mskconnect-plugins.yaml(抜粋)
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(追記分)
 Resources:
   DebeziumPlugin:
     Type: AWS::KafkaConnect::CustomPlugin
@@ -314,8 +343,8 @@ Resources:
       ContentType: ZIP
       Location:
         S3Location:
-          BucketArn: !ImportValue "pg-cdc-PluginBucketArn"
-          FileKey: debezium-connector-postgres.zip
+          BucketArn: !GetAtt PluginBucket.Arn
+          FileKey: !Ref DebeziumPluginKey # debezium-connector-postgres.zip
 
   SnowflakePlugin:
     Type: AWS::KafkaConnect::CustomPlugin
@@ -323,66 +352,19 @@ Resources:
       ContentType: ZIP
       Location:
         S3Location:
-          BucketArn: !ImportValue "pg-cdc-PluginBucketArn"
-          FileKey: snowflake-kafka-connector.zip
+          BucketArn: !GetAtt PluginBucket.Arn
+          FileKey: !Ref SnowflakePluginKey # snowflake-kafka-connector.zip
 ```
 
 ```bash
 aws cloudformation deploy \
-  --stack-name pg-cdc-mskconnect-plugins \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/05-mskconnect-plugins.yaml \
-  --parameter-overrides ProjectName=pg-cdc
+  --stack-name pg-cdc \
+  --template-file cloudformation/postgres-debezium-kafka-snowflake/template.yaml \
+  --parameter-overrides ProjectName=pg-cdc \
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
-## STEP5: Debezium PostgreSQL Source Connectorを設定する
-
-Debezium・Snowflake両コネクタと、それらが使うMSK Connect実行ロールは`06-mskconnect-connectors.yaml`にまとめています。実行ロールには、Kafkaクラスタへの`kafka-cluster:Connect` / `*Topic*` / `*Group*`権限、ENI管理権限、RDS/Snowflakeの認証情報を格納したSecrets Managerへの`GetSecretValue`権限を付与しています。
-
-コネクタ設定のポイントは以下です。
-
-- `plugin.name=pgoutput`(RDSはネイティブの`pgoutput`が使え、追加の拡張インストールが不要)
-- `topic.prefix`でトピック名の接頭辞(サーバー論理名)を決める
-- `table.include.list`でキャプチャ対象を明示的に絞る
-- `snapshot.mode=initial`で初回起動時に既存データを一括取り込みしてからWAL追跡に切り替える
-- SMTは使わず、`before` / `after` / `op` を含むDebeziumのエンベロープをそのままJSONで流す(後述のSnowflake側でVARIANTとして受け止め、SQLで加工する方針のため)
-
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/06-mskconnect-connectors.yaml(抜粋)
-Resources:
-  DebeziumPostgresSourceConnector:
-    Type: AWS::KafkaConnect::Connector
-    Properties:
-      ConnectorConfiguration:
-        connector.class: io.debezium.connector.postgresql.PostgresConnector
-        database.hostname: !Ref DebeziumDbHost
-        database.password: !Join ["", ["${secretsManager:", !Ref DebeziumDbSecretArn, ":password}"]]
-        topic.prefix: !Ref DebeziumTopicPrefix         # pgdb
-        table.include.list: !Ref DebeziumTableIncludeList # public.orders
-        plugin.name: pgoutput
-        publication.name: !Ref DebeziumPublicationName # dbz_publication
-        publication.autocreate.mode: disabled
-        slot.name: !Ref DebeziumSlotName               # dbz_pgdb_slot
-        snapshot.mode: initial
-        key.converter.schemas.enable: "false"
-        value.converter.schemas.enable: "true"
-        heartbeat.interval.ms: "10000"
-      Plugins:
-        - CustomPlugin:
-            CustomPluginArn: !ImportValue "pg-cdc-DebeziumPluginArn"
-            Revision: !ImportValue "pg-cdc-DebeziumPluginRevision"
-      ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
-```
-
-`database.password`は`Fn::Join`で`${secretsManager:<ARN>:password}`という文字列を組み立てています(MSK Connect側がこの構文をランタイムで解決してくれるので、パスワードを平文で書かずに済みます[^msk-connect-secrets])。CloudFormationの`Fn::Sub`は`${...}`をテンプレート側の置換として解釈してしまうため、ここは意図的に`Fn::Join`にしている点に注意してください。
-
-[^msk-connect-secrets]: [Externalize secrets for MSK Connect connector configuration](https://docs.aws.amazon.com/msk/latest/developerguide/mkc-externalize-secrets.html)
-
-`heartbeat.interval.ms`を設定しているのは、対象テーブルの更新頻度が低い場合でもレプリケーションスロットのLSNを定期的に前進させ、WALの滞留を防ぐためです[^debezium-heartbeat]。
-
-[^debezium-heartbeat]: [Debezium connector for PostgreSQL - Heartbeat messages](https://debezium.io/documentation/reference/stable/connectors/postgresql.html#postgresql-heartbeat-messages) に、低頻度更新テーブルではハートビートなしだとLSNが進まずWALが溜まり続けるリスクが明記されています。
-
-コネクタの作成(スタックの適用)はSnowflake側の準備が終わってから、STEP7でまとめて行います。
-
-## STEP6: Snowflake側の受け皿を準備する
+## STEP4: Snowflake側の受け皿を準備する
 
 `snow` CLIは接続済みですが、今回用のDB/ウェアハウス/ロール/ユーザーはまだ存在しないため作成します。
 
@@ -427,12 +409,12 @@ CREATE TABLE IF NOT EXISTS PG_CDC_DB.RAW.ORDERS_CDC_RAW (
 
 ### コネクタ用の認証情報をSecrets Managerへ登録
 
-`06-mskconnect-connectors.yaml`はDBパスワードとSnowflakeの秘密鍵をテンプレートに直書きせず、Secrets ManagerのARNをパラメータとして受け取る作りにしています。鍵・パスワードそのものをGitで管理するテンプレートファイルに含めないためです。STEP2で作った`debezium`ユーザーのパスワードと、上で生成した秘密鍵をそれぞれ登録します。
+テンプレートにこの後追記するコネクタは、DBパスワードとSnowflakeの秘密鍵を直書きせず、Secrets ManagerのARNをパラメータとして受け取る作りにしています。鍵・パスワードそのものをGitで管理するテンプレートファイルに含めないためです。STEP1で作った`debezium`ユーザーのパスワードと、上で生成した秘密鍵をそれぞれ登録します。
 
 ```bash
 DEBEZIUM_DB_SECRET_ARN=$(aws secretsmanager create-secret \
   --name pg-cdc/debezium-db-user \
-  --secret-string "{\"password\":\"<STEP2で設定したパスワード>\"}" \
+  --secret-string "{\"password\":\"<STEP1で設定したパスワード>\"}" \
   --query ARN --output text)
 
 PRIVATE_KEY_BODY=$(grep -v "PRIVATE KEY" kafka_connector_key.p8 | tr -d '\n')
@@ -443,12 +425,47 @@ SNOWFLAKE_KEY_SECRET_ARN=$(aws secretsmanager create-secret \
   --query ARN --output text)
 ```
 
-## STEP7: Snowflake Sink Connectorを設定し、両コネクタをデプロイする
+## STEP5: MSK Connectコネクタをテンプレートに追記し、両方デプロイする
 
-同じ`06-mskconnect-connectors.yaml`の中に、Snowflake Sink Connectorも定義しています。
+最後に、Debezium Source ConnectorとSnowflake Sink Connector、それらが使うMSK Connect実行ロールを`template.yaml`に追記します。実行ロールには、Kafkaクラスタへの`kafka-cluster:Connect` / `*Topic*` / `*Group*`権限、ENI管理権限、Secrets Managerへの`GetSecretValue`権限を付与しています。
 
-```yaml:cloudformation/postgres-debezium-kafka-snowflake/06-mskconnect-connectors.yaml(抜粋)
+コネクタ設定のポイントは以下です。
+
+- `plugin.name=pgoutput`(RDSはネイティブの`pgoutput`が使え、追加の拡張インストールが不要)
+- `topic.prefix`でトピック名の接頭辞(サーバー論理名)を決める
+- `table.include.list`でキャプチャ対象を明示的に絞る
+- `snapshot.mode=initial`で初回起動時に既存データを一括取り込みしてからWAL追跡に切り替える
+- SMTは使わず、`before` / `after` / `op` を含むDebeziumのエンベロープをそのままJSONで流す(Snowflake側でVARIANTとして受け止め、SQLで加工する方針のため)
+- `value.converter.schemas.enable=true`にしているのは、Snowflake Sink側の同項目と揃える必要があるためです(JSONのペイロードが`{"schema": ..., "payload": {...}}`の形になります)
+
+```yaml:cloudformation/postgres-debezium-kafka-snowflake/template.yaml(追記分)
 Resources:
+  DebeziumPostgresSourceConnector:
+    Type: AWS::KafkaConnect::Connector
+    Properties:
+      ConnectorConfiguration:
+        connector.class: io.debezium.connector.postgresql.PostgresConnector
+        database.hostname: !GetAtt DBInstance.Endpoint.Address
+        database.port: !GetAtt DBInstance.Endpoint.Port
+        database.user: !Ref DebeziumDbUsername
+        database.password: !Join ["", ["${secretsManager:", !Ref DebeziumDbSecretArn, ":password}"]]
+        database.dbname: !Ref DBName
+        topic.prefix: !Ref DebeziumTopicPrefix         # pgdb
+        table.include.list: !Ref DebeziumTableIncludeList # public.orders
+        plugin.name: pgoutput
+        publication.name: !Ref DebeziumPublicationName # dbz_publication
+        publication.autocreate.mode: disabled
+        slot.name: !Ref DebeziumSlotName               # dbz_pgdb_slot
+        snapshot.mode: initial
+        key.converter.schemas.enable: "false"
+        value.converter.schemas.enable: "true"
+        heartbeat.interval.ms: "10000"
+      Plugins:
+        - CustomPlugin:
+            CustomPluginArn: !Ref DebeziumPlugin
+            Revision: !GetAtt DebeziumPlugin.Revision
+      ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
+
   SnowflakeSinkConnector:
     Type: AWS::KafkaConnect::Connector
     Properties:
@@ -469,23 +486,28 @@ Resources:
         value.converter.schemas.enable: "true"
       Plugins:
         - CustomPlugin:
-            CustomPluginArn: !ImportValue "pg-cdc-SnowflakePluginArn"
-            Revision: !ImportValue "pg-cdc-SnowflakePluginRevision"
+            CustomPluginArn: !Ref SnowflakePlugin
+            Revision: !GetAtt SnowflakePlugin.Revision
       ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
 ```
 
-`value.converter.schemas.enable=true`にしているのは、Debezium側で`schemas.enable=true`にしているためです(JSONのペイロードが`{"schema": ..., "payload": {...}}`の形になり、両者のConverter設定を揃える必要があります)。`snowflake.enable.schematization`は`false`のままにして、テーブル定義済みの`RECORD_METADATA` / `RECORD_CONTENT`にそのまま書き込みます。
+`database.password` / `snowflake.private.key`は`Fn::Join`で`${secretsManager:<ARN>:password}`という文字列を組み立てています(MSK Connect側がこの構文をランタイムで解決してくれるので、平文を書かずに済みます[^msk-connect-secrets])。CloudFormationの`Fn::Sub`は`${...}`をテンプレート側の置換として解釈してしまうため、ここは意図的に`Fn::Join`にしている点に注意してください。同様に`database.hostname`はSTEP1で作った`DBInstance`を`!GetAtt`で直接参照しています。1ファイルにまとめたことで、他スタックの値をパラメータ経由で受け渡す必要がなくなりました。
 
-ここまでの準備(RDSエンドポイント、STEP6で登録した2つのSecrets Manager ARN、Snowflakeアカウント情報)が揃ったら、1回のデプロイでDebezium/Snowflake両コネクタを作成します。
+[^msk-connect-secrets]: [Externalize secrets for MSK Connect connector configuration](https://docs.aws.amazon.com/msk/latest/developerguide/mkc-externalize-secrets.html)
+
+`heartbeat.interval.ms`を設定しているのは、対象テーブルの更新頻度が低い場合でもレプリケーションスロットのLSNを定期的に前進させ、WALの滞留を防ぐためです[^debezium-heartbeat]。
+
+[^debezium-heartbeat]: [Debezium connector for PostgreSQL - Heartbeat messages](https://debezium.io/documentation/reference/stable/connectors/postgresql.html#postgresql-heartbeat-messages) に、低頻度更新テーブルではハートビートなしだとLSNが進まずWALが溜まり続けるリスクが明記されています。
+
+ここまでの準備(RDSはテンプレート内から直接参照、STEP4で登録した2つのSecrets Manager ARN、Snowflakeアカウント情報)が揃ったら、最後のデプロイでDebezium/Snowflake両コネクタを作成します。
 
 ```bash
 aws cloudformation deploy \
-  --stack-name pg-cdc-mskconnect-connectors \
-  --template-file cloudformation/postgres-debezium-kafka-snowflake/06-mskconnect-connectors.yaml \
+  --stack-name pg-cdc \
+  --template-file cloudformation/postgres-debezium-kafka-snowflake/template.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
     ProjectName=pg-cdc \
-    DebeziumDbHost="$DB_HOST" \
     DebeziumDbSecretArn="$DEBEZIUM_DB_SECRET_ARN" \
     SnowflakeAccountUrl="https://<account>.snowflakecomputing.com" \
     SnowflakePrivateKeySecretArn="$SNOWFLAKE_KEY_SECRET_ARN"
@@ -499,7 +521,7 @@ aws kafkaconnect list-connectors --query "connectors[].{name:connectorName,state
 
 CloudWatch Logsのロググループ`/msk-connect/pg-cdc`に、Debezium側のスナップショット完了ログ(`Snapshot ended with SnapshotResult`など)が出ていれば取り込みが動いています。
 
-## STEP8: 動作確認
+## STEP6: 動作確認
 
 ### スナップショットの確認
 
@@ -540,7 +562,7 @@ ORDER BY ts_ms;
 
 [^replica-identity]: [Debezium connector for PostgreSQL - REPLICA IDENTITY](https://debezium.io/documentation/reference/stable/connectors/postgresql.html#postgresql-replica-identity) に、`REPLICA IDENTITY`の設定によって`UPDATE`/`DELETE`イベントの`before`に含まれる情報量が変わる旨の記載があります。
 
-## STEP9: 「現在値」テーブルへ反映する
+## STEP7: 「現在値」テーブルへ反映する
 
 CDCイベントの生ログをそのまま使うと分析しづらいので、Stream + MERGEで最新状態のテーブルへ反映します。
 
@@ -583,9 +605,9 @@ WHEN NOT MATCHED AND src.op != 'd' THEN
 | --- | --- |
 | レプリケーションスロットの滞留 | コネクタが停止・詰まった状態が続くとレプリケーションスロットが未消費のWALを保持し続け、RDSのストレージを圧迫します。`pg_replication_slots`の`confirmed_flush_lsn`を監視し、長時間停止するなら`slot.drop.on.stop`やアラートを検討します |
 | 配信保証 | Kafka Connect全般と同じくat-least-once配信です。今回のMERGEは`ts_ms`降順で1件に絞っているため、同一イベントが重複配信されても冪等になります |
-| コスト | RDS + MSK(3ブローカー) + NAT Gateway + MSK Connect(2コネクタ)が常時課金されます。検証後は`aws cloudformation delete-stack`で`06`→`01`の逆順にスタックを削除し(S3バケットは中身を空にしてから)、レプリケーションスロットも明示的に削除してください |
+| コスト | RDS + MSK(3ブローカー) + NAT Gateway + MSK Connect(2コネクタ)が常時課金されます。検証後は`aws cloudformation delete-stack --stack-name pg-cdc`で一括削除できます(S3バケットは中身を空にしてから)。レプリケーションスロットも明示的に削除してください |
 | スキーマ変更 | `table.include.list`に対するDDL変更(カラム追加など)はDebeziumがスキーマ変更イベントとして検知しますが、下流のMERGE SQLは手動更新が必要です |
-| セキュリティ | DB認証情報・Snowflakeの秘密鍵は必ずSecrets Manager経由(`${secretsManager:...}`)で渡し、CloudFormationテンプレートに平文で書かないようにします(今回の`06-mskconnect-connectors.yaml`もARNだけをパラメータで受け取る作りにしています) |
+| セキュリティ | DB認証情報・Snowflakeの秘密鍵は必ずSecrets Manager経由(`${secretsManager:...}`)で渡し、CloudFormationテンプレートに平文で書かないようにします。`template.yaml`もARNだけをパラメータで受け取る作りにしています |
 
 ## おわりに
 
@@ -595,4 +617,4 @@ RDS for PostgreSQL → Debezium(MSK Connect) → Amazon MSK → Snowflake Kafka 
 - スナップショット(初期ロード)とWALベースの継続追跡が1つのコネクタで完結する
 - CDCイベントが`before` / `after` / `op`を持つため、単なる追記ではなく「現在値」の再現(UPDATE/DELETEの反映)まで見据えた設計が必要になる
 
-という違いがありました。次は実際にこの手順を流し、レイテンシや障害時の挙動(コネクタ再起動時にスロットから正しく再開できるか等)を検証した記事を書く予定です。
+という違いがありました。CloudFormationも前回のTerraformから1ファイル・1スタック構成に変え、VPC/RDSという「土台」から始めてMSK・MSK Connectを追記していく流れにしたことで、どのSTEPでどのリソースが増えるかが1つのファイルの差分として追いやすくなりました。次は実際にこの手順を流し、レイテンシや障害時の挙動(コネクタ再起動時にスロットから正しく再開できるか等)を検証した記事を書く予定です。

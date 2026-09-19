@@ -1,0 +1,799 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  PostgreSQL -> Debezium -> Amazon MSK -> Snowflake の検証環境。
+  単一スタックとして、VPC/RDSから始めてMSK・MSK Connectプラグイン・コネクタの順に
+  セクションを追記しながら `aws cloudformation deploy` で育てていく想定のテンプレート。
+  スタック名は一貫して `pg-cdc` を使う。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: pg-cdc
+    Description: リソース名のプレフィックスに使う識別子
+
+  # ---------------------------------------------------------------------
+  # STEP1: ネットワーク(VPC / サブネット / SG / NAT / 踏み台)
+  # ---------------------------------------------------------------------
+  VpcCidr:
+    Type: String
+    Default: 10.40.0.0/16
+
+  PrivateSubnetCidrs:
+    Type: CommaDelimitedList
+    Default: "10.40.0.0/20,10.40.16.0/20,10.40.32.0/20"
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.40.48.0/20
+
+  CreateBastion:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: SSM Session Manager経由で接続する踏み台EC2(psql / kafka console client検証用)を作るかどうか
+
+  BastionInstanceType:
+    Type: String
+    Default: t3.micro
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  # ---------------------------------------------------------------------
+  # STEP2: RDS for PostgreSQL
+  # ---------------------------------------------------------------------
+  DBInstanceIdentifier:
+    Type: String
+    Default: pg-cdc-source
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+
+  AllocatedStorage:
+    Type: Number
+    Default: 20
+
+  EngineVersion:
+    Type: String
+    Default: "16.4"
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  MasterUsername:
+    Type: String
+    Default: postgres
+
+  # ---------------------------------------------------------------------
+  # STEP3: Amazon MSK(ここから先は該当STEPに来たら追記するパラメータ)
+  # ---------------------------------------------------------------------
+  ClusterName:
+    Type: String
+    Default: pg-cdc-kafka
+
+  KafkaVersion:
+    Type: String
+    Default: "3.8.x"
+
+  BrokerInstanceType:
+    Type: String
+    Default: kafka.t3.small
+
+  EbsVolumeSize:
+    Type: Number
+    Default: 10
+
+  # ---------------------------------------------------------------------
+  # STEP4: MSK Connectカスタムプラグイン
+  # ---------------------------------------------------------------------
+  DebeziumPluginKey:
+    Type: String
+    Default: debezium-connector-postgres.zip
+
+  SnowflakePluginKey:
+    Type: String
+    Default: snowflake-kafka-connector.zip
+
+  # ---------------------------------------------------------------------
+  # STEP5・STEP7: MSK Connectコネクタ(Debezium Source / Snowflake Sink)
+  # ---------------------------------------------------------------------
+  KafkaConnectVersion:
+    Type: String
+    Default: "2.7.1"
+
+  McuCount:
+    Type: Number
+    Default: 1
+
+  WorkerCount:
+    Type: Number
+    Default: 1
+
+  DebeziumDbUsername:
+    Type: String
+    Default: debezium
+
+  DebeziumDbSecretArn:
+    Type: String
+    Default: ""
+    Description: >
+      debeziumユーザーのパスワードを持つSecrets ManagerシークレットのARN(json key: password)。
+      STEP2でRDSにdebeziumユーザーを作成した後、CLIでシークレットを作成してから値を渡す(STEP5参照)。
+
+  DebeziumTopicPrefix:
+    Type: String
+    Default: pgdb
+
+  DebeziumTableIncludeList:
+    Type: String
+    Default: public.orders
+
+  DebeziumPublicationName:
+    Type: String
+    Default: dbz_publication
+
+  DebeziumSlotName:
+    Type: String
+    Default: dbz_pgdb_slot
+
+  SnowflakeAccountUrl:
+    Type: String
+    Default: ""
+    Description: "例: https://xxxxxxx-xxxxxxx.snowflakecomputing.com(STEP6完了後に指定)"
+
+  SnowflakeUser:
+    Type: String
+    Default: PG_CDC_KAFKA_USER
+
+  SnowflakeRole:
+    Type: String
+    Default: PG_CDC_KAFKA_ROLE
+
+  SnowflakeDatabase:
+    Type: String
+    Default: PG_CDC_DB
+
+  SnowflakeSchema:
+    Type: String
+    Default: RAW
+
+  SnowflakeTopic2TableMap:
+    Type: String
+    Default: "pgdb.public.orders:ORDERS_CDC_RAW"
+
+  SnowflakePrivateKeySecretArn:
+    Type: String
+    Default: ""
+    Description: "Snowflake Kafka Connector用RSA秘密鍵を持つSecrets ManagerシークレットのARN(json key: private_key)。STEP6完了後に指定"
+
+Conditions:
+  HasBastion: !Equals [!Ref CreateBastion, "true"]
+  HasDebeziumConnector: !Not [!Equals [!Ref DebeziumDbSecretArn, ""]]
+  HasSnowflakeConnector: !Not [!Equals [!Ref SnowflakePrivateKeySecretArn, ""]]
+
+Resources:
+  # =======================================================================
+  # STEP1: ネットワーク(VPC / サブネット / SG / NAT / 踏み台)
+  # =======================================================================
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PrivateSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Ref PrivateSubnetCidrs]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-0"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Ref PrivateSubnetCidrs]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Ref PrivateSubnetCidrs]
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-2"
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-0"
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-rt"
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet0RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet0
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} RDS for PostgreSQL"
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-sg"
+
+  MskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} Amazon MSK broker"
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-msk-sg"
+
+  MskConnectSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} MSK Connect workers"
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "RDS / MSK / Snowflakeエンドポイントへの送信を許可"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-mskconnect-sg"
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: HasBastion
+    Properties:
+      GroupDescription: !Sub "${ProjectName} bastion (SSM Session Manager経由、インバウンド不要)"
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-bastion-sg"
+
+  RdsIngressFromMskConnect:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref MskConnectSecurityGroup
+      Description: "Debezium PostgreSQL ConnectorからのCDC読み取り"
+
+  RdsIngressFromBastion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasBastion
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+      Description: "psqlでの動作確認用"
+
+  MskIngressFromMskConnectIam:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9098
+      ToPort: 9098
+      SourceSecurityGroupId: !Ref MskConnectSecurityGroup
+      Description: "MSK Connect(IAM認証)"
+
+  MskIngressFromBastionIam:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasBastion
+    Properties:
+      GroupId: !Ref MskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9098
+      ToPort: 9098
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+      Description: "踏み台からのkafka-console-consumer等(aws-msk-iam-auth使用)"
+
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: HasBastion
+    Properties:
+      Roles:
+        - !Ref BastionRole
+
+  BastionRole:
+    Type: AWS::IAM::Role
+    Condition: HasBastion
+    Properties:
+      RoleName: !Sub "${ProjectName}-bastion-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: msk-describe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka:DescribeCluster
+                  - kafka:GetBootstrapBrokers
+                Resource: "*"
+
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Condition: HasBastion
+    Properties:
+      InstanceType: !Ref BastionInstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref BastionSecurityGroup
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-bastion"
+
+  # =======================================================================
+  # STEP2: RDS for PostgreSQL(論理レプリケーション有効化)
+  # =======================================================================
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres16
+      Description: !Sub "${ProjectName}: enable logical replication for Debezium"
+      Parameters:
+        rds.logical_replication: "1"
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} subnet group"
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceIdentifier
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref AllocatedStorage
+      StorageType: gp3
+      DBName: !Ref DBName
+      MasterUsername: !Ref MasterUsername
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+
+  # =======================================================================
+  # STEP3: Amazon MSK(IAM認証のみ)
+  # =======================================================================
+  MskCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      KafkaVersion: !Ref KafkaVersion
+      NumberOfBrokerNodes: 3
+      BrokerNodeGroupInfo:
+        InstanceType: !Ref BrokerInstanceType
+        ClientSubnets:
+          - !Ref PrivateSubnet0
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroups:
+          - !Ref MskSecurityGroup
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: !Ref EbsVolumeSize
+      EncryptionInfo:
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
+      ClientAuthentication:
+        Sasl:
+          Iam:
+            Enabled: true
+      EnhancedMonitoring: DEFAULT
+
+  # =======================================================================
+  # STEP4: MSK Connectカスタムプラグイン用S3バケット & プラグイン登録
+  #   プラグインZIP本体はCloudFormationでは作れないビルド成果物のため、
+  #   1) このバケットをデプロイ
+  #   2) `aws s3 cp` でZIPをアップロード
+  #   3) 再度デプロイしてDebeziumPlugin/SnowflakePluginを作成
+  #   という2段階のデプロイになる(手順はSTEP4を参照)。
+  # =======================================================================
+  PluginBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-connect-plugins-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  PluginBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PluginBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowMskConnectRead
+            Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${PluginBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  DebeziumPlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    Properties:
+      Name: !Sub "${ProjectName}-debezium-postgres-connector"
+      ContentType: ZIP
+      Description: "Debezium PostgreSQL Connector"
+      Location:
+        S3Location:
+          BucketArn: !GetAtt PluginBucket.Arn
+          FileKey: !Ref DebeziumPluginKey
+
+  SnowflakePlugin:
+    Type: AWS::KafkaConnect::CustomPlugin
+    Properties:
+      Name: !Sub "${ProjectName}-snowflake-kafka-connector"
+      ContentType: ZIP
+      Description: "Snowflake Connector for Kafka"
+      Location:
+        S3Location:
+          BucketArn: !GetAtt PluginBucket.Arn
+          FileKey: !Ref SnowflakePluginKey
+
+  # =======================================================================
+  # STEP5・STEP7: MSK Connect実行ロール & コネクタ(Debezium Source / Snowflake Sink)
+  #   DebeziumDbSecretArn / SnowflakePrivateKeySecretArn は
+  #   STEP5・STEP6でCLIから作成したSecrets ManagerのARNを渡すまでは空文字のままにしておき、
+  #   Conditionでコネクタ自体の作成を後回しにできるようにしている。
+  # =======================================================================
+  ConnectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/msk-connect/${ProjectName}"
+      RetentionInDays: 14
+
+  ConnectExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-mskconnect-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: msk-connect-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: KafkaCluster
+                Effect: Allow
+                Action:
+                  - kafka-cluster:Connect
+                  - kafka-cluster:DescribeCluster
+                  - kafka-cluster:AlterCluster
+                  - kafka-cluster:DescribeClusterDynamicConfiguration
+                  - kafka-cluster:CreateTopic
+                  - kafka-cluster:DescribeTopic
+                  - kafka-cluster:AlterTopic
+                  - kafka-cluster:DescribeTopicDynamicConfiguration
+                  - kafka-cluster:ReadData
+                  - kafka-cluster:WriteData
+                  - kafka-cluster:AlterGroup
+                  - kafka-cluster:DescribeGroup
+                Resource: "*"
+              - Sid: NetworkInterfaces
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                  - ec2:CreateNetworkInterfacePermission
+                Resource: "*"
+              - Sid: Secrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*"
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                Resource: !GetAtt ConnectLogGroup.Arn
+
+  DebeziumPostgresSourceConnector:
+    Type: AWS::KafkaConnect::Connector
+    Condition: HasDebeziumConnector
+    Properties:
+      ConnectorName: !Sub "${ProjectName}-debezium-postgres-source"
+      ConnectorDescription: "RDS for PostgreSQL -> Kafka(CDC)"
+      KafkaConnectVersion: !Ref KafkaConnectVersion
+      Capacity:
+        ProvisionedCapacity:
+          McuCount: !Ref McuCount
+          WorkerCount: !Ref WorkerCount
+      ConnectorConfiguration:
+        connector.class: io.debezium.connector.postgresql.PostgresConnector
+        tasks.max: "1"
+        database.hostname: !GetAtt DBInstance.Endpoint.Address
+        database.port: !GetAtt DBInstance.Endpoint.Port
+        database.user: !Ref DebeziumDbUsername
+        database.password: !Join ["", ["${secretsManager:", !Ref DebeziumDbSecretArn, ":password}"]]
+        database.dbname: !Ref DBName
+        topic.prefix: !Ref DebeziumTopicPrefix
+        table.include.list: !Ref DebeziumTableIncludeList
+        plugin.name: pgoutput
+        publication.name: !Ref DebeziumPublicationName
+        publication.autocreate.mode: disabled
+        slot.name: !Ref DebeziumSlotName
+        snapshot.mode: initial
+        key.converter: org.apache.kafka.connect.json.JsonConverter
+        key.converter.schemas.enable: "false"
+        value.converter: org.apache.kafka.connect.json.JsonConverter
+        value.converter.schemas.enable: "true"
+        heartbeat.interval.ms: "10000"
+      KafkaCluster:
+        ApacheKafkaCluster:
+          BootstrapServers: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+          Vpc:
+            SecurityGroups:
+              - !Ref MskConnectSecurityGroup
+            Subnets:
+              - !Ref PrivateSubnet0
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+      KafkaClusterClientAuthentication:
+        AuthenticationType: IAM
+      KafkaClusterEncryptionInTransit:
+        EncryptionType: TLS
+      Plugins:
+        - CustomPlugin:
+            CustomPluginArn: !Ref DebeziumPlugin
+            Revision: !GetAtt DebeziumPlugin.Revision
+      ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
+      LogDelivery:
+        WorkerLogDelivery:
+          CloudWatchLogs:
+            Enabled: true
+            LogGroup: !Ref ConnectLogGroup
+
+  SnowflakeSinkConnector:
+    Type: AWS::KafkaConnect::Connector
+    Condition: HasSnowflakeConnector
+    Properties:
+      ConnectorName: !Sub "${ProjectName}-snowflake-sink"
+      ConnectorDescription: "Kafka(CDC) -> Snowflake(Snowpipe Streaming)"
+      KafkaConnectVersion: !Ref KafkaConnectVersion
+      Capacity:
+        ProvisionedCapacity:
+          McuCount: !Ref McuCount
+          WorkerCount: !Ref WorkerCount
+      ConnectorConfiguration:
+        connector.class: com.snowflake.kafka.connector.SnowflakeSinkConnector
+        tasks.max: "1"
+        topics: !Sub "${DebeziumTopicPrefix}.${DebeziumTableIncludeList}"
+        snowflake.topic2table.map: !Ref SnowflakeTopic2TableMap
+        snowflake.url.name: !Ref SnowflakeAccountUrl
+        snowflake.user.name: !Ref SnowflakeUser
+        snowflake.private.key: !Join ["", ["${secretsManager:", !Ref SnowflakePrivateKeySecretArn, ":private_key}"]]
+        snowflake.role.name: !Ref SnowflakeRole
+        snowflake.database.name: !Ref SnowflakeDatabase
+        snowflake.schema.name: !Ref SnowflakeSchema
+        snowflake.ingestion.method: SNOWPIPE_STREAMING
+        snowflake.enable.schematization: "false"
+        snowflake.streaming.max.client.lag: "1"
+        key.converter: org.apache.kafka.connect.storage.StringConverter
+        value.converter: org.apache.kafka.connect.json.JsonConverter
+        value.converter.schemas.enable: "true"
+      KafkaCluster:
+        ApacheKafkaCluster:
+          BootstrapServers: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+          Vpc:
+            SecurityGroups:
+              - !Ref MskConnectSecurityGroup
+            Subnets:
+              - !Ref PrivateSubnet0
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+      KafkaClusterClientAuthentication:
+        AuthenticationType: IAM
+      KafkaClusterEncryptionInTransit:
+        EncryptionType: TLS
+      Plugins:
+        - CustomPlugin:
+            CustomPluginArn: !Ref SnowflakePlugin
+            Revision: !GetAtt SnowflakePlugin.Revision
+      ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
+      LogDelivery:
+        WorkerLogDelivery:
+          CloudWatchLogs:
+            Enabled: true
+            LogGroup: !Ref ConnectLogGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  PrivateSubnetIds:
+    Value: !Join [",", [!Ref PrivateSubnet0, !Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+  BastionInstanceId:
+    Condition: HasBastion
+    Value: !Ref BastionInstance
+  DBInstanceEndpointAddress:
+    Value: !GetAtt DBInstance.Endpoint.Address
+  DBInstanceEndpointPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+  MasterUserSecretArn:
+    Value: !GetAtt DBInstance.MasterUserSecret.SecretArn
+    Description: "マスターパスワードが入ったSecrets ManagerシークレットARN(RDSが自動作成)"
+  MskClusterArn:
+    Value: !Ref MskCluster
+  MskBootstrapBrokerStringSaslIam:
+    Value: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+  PluginBucketName:
+    Value: !Ref PluginBucket
+  DebeziumConnectorArn:
+    Condition: HasDebeziumConnector
+    Value: !Ref DebeziumPostgresSourceConnector
+  SnowflakeConnectorArn:
+    Condition: HasSnowflakeConnector
+    Value: !Ref SnowflakeSinkConnector

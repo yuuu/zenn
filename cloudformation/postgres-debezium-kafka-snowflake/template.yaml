@@ -18,6 +18,13 @@ Parameters:
     Type: String
     Default: 10.40.0.0/16
 
+  AvailabilityZones:
+    Type: CommaDelimitedList
+    Default: "ap-northeast-1a,ap-northeast-1c,ap-northeast-1d"
+    Description: >
+      Fn::GetAZsがこのアカウントでは利用可能な全AZを返さない場合があるため、
+      明示的にAZ名をパラメータとして受け取る。
+
   PrivateSubnetCidrs:
     Type: CommaDelimitedList
     Default: "10.40.0.0/20,10.40.16.0/20,10.40.32.0/20"
@@ -57,7 +64,7 @@ Parameters:
 
   EngineVersion:
     Type: String
-    Default: "16.4"
+    Default: "16.15"
 
   DBName:
     Type: String
@@ -91,18 +98,29 @@ Parameters:
   # ---------------------------------------------------------------------
   DebeziumPluginKey:
     Type: String
-    Default: debezium-connector-postgres.zip
+    Default: debezium-connector-postgres-v2.zip
+    Description: >
+      DebeziumのコネクタJARに加え、MSK config providers(後述のWorkerConfiguration参照)の
+      JARも同梱したZIPのS3キー。
 
   SnowflakePluginKey:
     Type: String
-    Default: snowflake-kafka-connector.zip
+    Default: snowflake-kafka-connector-v3.zip
+    Description: >
+      Snowflakeコネクタのfat jarに加え、MSK config providersのJAR、
+      および暗号化秘密鍵の復号に必要なBouncy Castle FIPSプロバイダ(bc-fips / bcpkix-fips)の
+      JARも同梱したZIPのS3キー。
 
   # ---------------------------------------------------------------------
   # STEP5・STEP7: MSK Connectコネクタ(Debezium Source / Snowflake Sink)
   # ---------------------------------------------------------------------
   KafkaConnectVersion:
     Type: String
-    Default: "2.7.1"
+    Default: "3.7.x"
+    Description: >
+      MSK Connectが対応するKafkaConnectVersionは本記事執筆時点で"2.7.1"と"3.7.x"のみ。
+      Debezium 3.x系プラグインは"2.7.1"のワーカーではプラグインクラスをロードできず
+      InvalidConnectorConfigurationで失敗するため"3.7.x"を使う。
 
   McuCount:
     Type: Number
@@ -111,6 +129,15 @@ Parameters:
   WorkerCount:
     Type: Number
     Default: 1
+
+  MskBootstrapServers:
+    Type: String
+    Default: ""
+    Description: >
+      MSKのIAM認証用ブートストラップブローカー文字列。AWS::MSK::Clusterは
+      CloudFormationのGetAttでこの値を取得できないため、STEP2完了後に
+      `aws kafka get-bootstrap-brokers --cluster-arn <MskClusterArn>`のCLI実行結果を
+      STEP5のdeploy時にパラメータとして渡す。
 
   DebeziumDbUsername:
     Type: String
@@ -122,6 +149,9 @@ Parameters:
     Description: >
       debeziumユーザーのパスワードを持つSecrets ManagerシークレットのARN(json key: password)。
       STEP2でRDSにdebeziumユーザーを作成した後、CLIでシークレットを作成してから値を渡す(STEP5参照)。
+      コネクタ設定内の${secretsmanager:...}プレースホルダーはARN中のコロンで
+      パス区切りが崩れるため、実際の参照にはシークレット名(${ProjectName}/debezium-db-user)を使う。
+      このパラメータはCondition判定とIAMポリシーのドキュメント用に保持している。
 
   DebeziumTopicPrefix:
     Type: String
@@ -206,7 +236,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Select [0, !Ref PrivateSubnetCidrs]
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !Select [0, !Ref AvailabilityZones]
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-private-0"
@@ -216,7 +246,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Select [1, !Ref PrivateSubnetCidrs]
-      AvailabilityZone: !Select [1, !GetAZs ""]
+      AvailabilityZone: !Select [1, !Ref AvailabilityZones]
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-private-1"
@@ -226,7 +256,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Select [2, !Ref PrivateSubnetCidrs]
-      AvailabilityZone: !Select [2, !GetAZs ""]
+      AvailabilityZone: !Select [2, !Ref AvailabilityZones]
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-private-2"
@@ -236,7 +266,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnetCidr
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !Select [0, !Ref AvailabilityZones]
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -347,7 +377,7 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
-          Description: "RDS / MSK / Snowflakeエンドポイントへの送信を許可"
+          Description: "Outbound to RDS / MSK / Snowflake endpoints"
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-mskconnect-sg"
@@ -356,7 +386,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Condition: HasBastion
     Properties:
-      GroupDescription: !Sub "${ProjectName} bastion (SSM Session Manager経由、インバウンド不要)"
+      GroupDescription: !Sub "${ProjectName} bastion (SSM Session Manager only, no inbound)"
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - IpProtocol: "-1"
@@ -373,7 +403,7 @@ Resources:
       FromPort: 5432
       ToPort: 5432
       SourceSecurityGroupId: !Ref MskConnectSecurityGroup
-      Description: "Debezium PostgreSQL ConnectorからのCDC読み取り"
+      Description: "CDC read from Debezium PostgreSQL Connector"
 
   RdsIngressFromBastion:
     Type: AWS::EC2::SecurityGroupIngress
@@ -384,7 +414,7 @@ Resources:
       FromPort: 5432
       ToPort: 5432
       SourceSecurityGroupId: !Ref BastionSecurityGroup
-      Description: "psqlでの動作確認用"
+      Description: "For psql verification"
 
   MskIngressFromMskConnectIam:
     Type: AWS::EC2::SecurityGroupIngress
@@ -394,7 +424,7 @@ Resources:
       FromPort: 9098
       ToPort: 9098
       SourceSecurityGroupId: !Ref MskConnectSecurityGroup
-      Description: "MSK Connect(IAM認証)"
+      Description: "MSK Connect (IAM auth)"
 
   MskIngressFromBastionIam:
     Type: AWS::EC2::SecurityGroupIngress
@@ -405,7 +435,7 @@ Resources:
       FromPort: 9098
       ToPort: 9098
       SourceSecurityGroupId: !Ref BastionSecurityGroup
-      Description: "踏み台からのkafka-console-consumer等(aws-msk-iam-auth使用)"
+      Description: "kafka-console-consumer etc. from bastion (aws-msk-iam-auth)"
 
   BastionInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -566,10 +596,14 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
 
+  # Nameは必須プロパティ。固定文字列のままFileKey(プラグインZIPの中身)を差し替えると
+  # 「置き換えが必要なのに同名リソースが既存のため更新できない」というエラーになるため、
+  # プラグインZIPのファイル名(バージョン付き)をNameにも含め、内容を差し替えるたびに
+  # Nameも変わるようにしている。
   DebeziumPlugin:
     Type: AWS::KafkaConnect::CustomPlugin
     Properties:
-      Name: !Sub "${ProjectName}-debezium-postgres-connector"
+      Name: !Sub "${ProjectName}-debezium-postgres-connector-v2"
       ContentType: ZIP
       Description: "Debezium PostgreSQL Connector"
       Location:
@@ -580,7 +614,7 @@ Resources:
   SnowflakePlugin:
     Type: AWS::KafkaConnect::CustomPlugin
     Properties:
-      Name: !Sub "${ProjectName}-snowflake-kafka-connector"
+      Name: !Sub "${ProjectName}-snowflake-kafka-connector-v3"
       ContentType: ZIP
       Description: "Snowflake Connector for Kafka"
       Location:
@@ -593,7 +627,26 @@ Resources:
   #   DebeziumDbSecretArn / SnowflakePrivateKeySecretArn は
   #   STEP5・STEP6でCLIから作成したSecrets ManagerのARNを渡すまでは空文字のままにしておき、
   #   Conditionでコネクタ自体の作成を後回しにできるようにしている。
+  #
+  #   ${secretsmanager:...}によるシークレット埋め込みはMSK Connectの組み込み機能ではなく、
+  #   OSSの"MSK config providers"(aws-samples/msk-config-providers)をプラグインZIPに
+  #   同梱した上で、以下のWorkerConfigurationでconfig.providersを明示的に有効化する必要がある。
   # =======================================================================
+  ConnectWorkerConfiguration:
+    Type: AWS::KafkaConnect::WorkerConfiguration
+    Properties:
+      Name: !Sub "${ProjectName}-secrets-worker-config"
+      PropertiesFileContent:
+        Fn::Base64:
+          !Sub |
+            key.converter=org.apache.kafka.connect.json.JsonConverter
+            key.converter.schemas.enable=false
+            value.converter=org.apache.kafka.connect.json.JsonConverter
+            value.converter.schemas.enable=true
+            config.providers=secretsmanager
+            config.providers.secretsmanager.class=com.amazonaws.kafka.config.providers.SecretsManagerConfigProvider
+            config.providers.secretsmanager.param.region=${AWS::Region}
+
   ConnectLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -651,6 +704,8 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DescribeSecret
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:ListSecretVersionIds
                 Resource:
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*"
               - Sid: Logs
@@ -678,7 +733,7 @@ Resources:
         database.hostname: !GetAtt DBInstance.Endpoint.Address
         database.port: !GetAtt DBInstance.Endpoint.Port
         database.user: !Ref DebeziumDbUsername
-        database.password: !Join ["", ["${secretsManager:", !Ref DebeziumDbSecretArn, ":password}"]]
+        database.password: !Join ["", ["${secretsmanager:", !Ref ProjectName, "/debezium-db-user:password}"]]
         database.dbname: !Ref DBName
         topic.prefix: !Ref DebeziumTopicPrefix
         table.include.list: !Ref DebeziumTableIncludeList
@@ -691,10 +746,14 @@ Resources:
         key.converter.schemas.enable: "false"
         value.converter: org.apache.kafka.connect.json.JsonConverter
         value.converter.schemas.enable: "true"
+        decimal.handling.mode: double
         heartbeat.interval.ms: "10000"
+        topic.creation.enable: "true"
+        topic.creation.default.replication.factor: "3"
+        topic.creation.default.partitions: "1"
       KafkaCluster:
         ApacheKafkaCluster:
-          BootstrapServers: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+          BootstrapServers: !Ref MskBootstrapServers
           Vpc:
             SecurityGroups:
               - !Ref MskConnectSecurityGroup
@@ -710,6 +769,9 @@ Resources:
         - CustomPlugin:
             CustomPluginArn: !Ref DebeziumPlugin
             Revision: !GetAtt DebeziumPlugin.Revision
+      WorkerConfiguration:
+        WorkerConfigurationArn: !Ref ConnectWorkerConfiguration
+        Revision: 1
       ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
       LogDelivery:
         WorkerLogDelivery:
@@ -729,25 +791,26 @@ Resources:
           McuCount: !Ref McuCount
           WorkerCount: !Ref WorkerCount
       ConnectorConfiguration:
-        connector.class: com.snowflake.kafka.connector.SnowflakeSinkConnector
+        connector.class: com.snowflake.kafka.connector.SnowflakeStreamingSinkConnector
         tasks.max: "1"
         topics: !Sub "${DebeziumTopicPrefix}.${DebeziumTableIncludeList}"
         snowflake.topic2table.map: !Ref SnowflakeTopic2TableMap
         snowflake.url.name: !Ref SnowflakeAccountUrl
         snowflake.user.name: !Ref SnowflakeUser
-        snowflake.private.key: !Join ["", ["${secretsManager:", !Ref SnowflakePrivateKeySecretArn, ":private_key}"]]
+        snowflake.private.key: !Join ["", ["${secretsmanager:", !Ref ProjectName, "/snowflake-kafka-user:private_key}"]]
         snowflake.role.name: !Ref SnowflakeRole
         snowflake.database.name: !Ref SnowflakeDatabase
         snowflake.schema.name: !Ref SnowflakeSchema
         snowflake.ingestion.method: SNOWPIPE_STREAMING
         snowflake.enable.schematization: "false"
         snowflake.streaming.max.client.lag: "1"
+        snowflake.streaming.validate.compatibility.with.classic: "false"
         key.converter: org.apache.kafka.connect.storage.StringConverter
         value.converter: org.apache.kafka.connect.json.JsonConverter
         value.converter.schemas.enable: "true"
       KafkaCluster:
         ApacheKafkaCluster:
-          BootstrapServers: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
+          BootstrapServers: !Ref MskBootstrapServers
           Vpc:
             SecurityGroups:
               - !Ref MskConnectSecurityGroup
@@ -763,6 +826,9 @@ Resources:
         - CustomPlugin:
             CustomPluginArn: !Ref SnowflakePlugin
             Revision: !GetAtt SnowflakePlugin.Revision
+      WorkerConfiguration:
+        WorkerConfigurationArn: !Ref ConnectWorkerConfiguration
+        Revision: 1
       ServiceExecutionRoleArn: !GetAtt ConnectExecutionRole.Arn
       LogDelivery:
         WorkerLogDelivery:
@@ -787,8 +853,6 @@ Outputs:
     Description: "マスターパスワードが入ったSecrets ManagerシークレットARN(RDSが自動作成)"
   MskClusterArn:
     Value: !Ref MskCluster
-  MskBootstrapBrokerStringSaslIam:
-    Value: !GetAtt MskCluster.BootstrapBrokerStringSaslIam
   PluginBucketName:
     Value: !Ref PluginBucket
   DebeziumConnectorArn:

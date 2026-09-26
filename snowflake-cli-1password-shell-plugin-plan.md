@@ -306,8 +306,18 @@ op plugin list | grep -i snowflake
 
 PRを出す前提なので、`sdk/plugintest`パッケージのヘルパーを使ったテストコードを`snowflake_test.go`に追記し（既存のパスワード認証のテストケースに加えて、キーペア認証のテストケースを追加する）、`make snowflake/example-secrets`の出力をテストフィクスチャとして使う。
 
+:::message
+[Makefile](https://github.com/1Password/shell-plugins/blob/main/Makefile)を確認したところ、`%/test`のようなプラグイン単位のテストターゲットは存在せず、`test`はリポジトリ全体を対象にした`go test ./...`のみだった。CONTRIBUTING.mdにもプラグイン単位のテストコマンドの記載は無い。**当初書いていた`make snowflake/test`という記述は誤りだったので修正した。**
+:::
+
 ```sh
-make snowflake/test
+make test    # go test ./... （リポジトリ全体のテストが走る。snowflakeパッケージのテストだけ走らせたい場合は go test ./plugins/snowflake/... を直接使う）
+```
+
+CIでは[golangci-lint](https://github.com/1Password/shell-plugins/blob/main/Makefile)によるlintも走る想定（Makefileに`lint`ターゲットがあり、Docker経由でCIと同じバージョンのgolangci-lintを実行する）。手元にDockerがあれば以下でCIと同じチェックを事前に確認できる。
+
+```sh
+make lint
 ```
 
 ## 7. 1Passwordにアイテムを登録して動かしてみる
@@ -453,7 +463,7 @@ EOF
 :::message
 - CONTRIBUTING.mdの指示通り、PR本文に「認証が必要な実行例コマンド」を含めた。
 - 既存プラグインへの後方互換性のある追加であることを強調し、レビューされやすくする。
-- Shell Pluginsはベータ版のためレビューに時間がかかったり、実装の手直しを求められる可能性がある。**実機検証（PRを実際に出してからのやり取り）で確定させる項目。** 記事執筆時点でPRがマージされていない場合は、その旨と「レビュー中」であることを正直に書く。
+- CONTRIBUTING.mdの「📣 Contributions Beta Notice」には、Shell Pluginsのエコシステムがまだベータであり、**ローカルでビルドしたプラグインは1Password CLIの更新に追従して随時再ビルドが必要になりうる**、という趣旨が明記されている（PRのレビュー期間そのものについての言及ではない）。レビューにどの程度時間がかかるか・手直しを求められるかは記事執筆時点で実際にPRを出してみないと分からない。**実機検証（PRを実際に出してからのやり取り）で確定させる項目。** 記事執筆時点でPRがマージされていない場合は、その旨と「レビュー中」であることを正直に書く。
 :::
 
 ## 12. クリーンアップ

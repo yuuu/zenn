@@ -49,7 +49,7 @@ TODO: 時間内に対応できた場合、秘密鍵を一時ファイルに書�
 
 ### ローカルでビルド・テストする
 
-TODO: `make snowflake/validate`、`make snowflake/example-secrets`、`make snowflake/test`、`make snowflake/build`の実行結果を貼る。既存のsnowsql用テストを壊していないことの確認結果も書く。
+TODO: `make snowflake/validate`、`make snowflake/example-secrets`、`make snowflake/build`、`make test`（プラグイン単位のテストターゲットは存在せず、リポジトリ全体の`go test ./...`しか無かった、という発見も含めて）の実行結果を貼る。既存のsnowsql用テストを壊していないことの確認結果も書く。
 
 ## 1Passwordにアイテムを登録して動かしてみる
 

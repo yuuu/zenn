@@ -29,7 +29,7 @@ TODO: 当初は「`snow`用の新規プラグインを自作する」つもり�
 
 ## Snowflake CLIはどうやって認証情報を受け取れるか
 
-TODO: `snow`と`snowsql`それぞれの認証情報の渡し方の違いを整理する。特に、`snow`は秘密鍵の中身をそのまま環境変数`SNOWFLAKE_PRIVATE_KEY_RAW`に渡せるのに対し、`snowsql`は秘密鍵をファイルパス（`--private-key-path`）でしか受け取れない、という非対称性が実装方針に影響した点を書く（[snowコマンドの公式ドキュメント](https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/configure-connections)、[snowsqlの公式ドキュメント](https://docs.snowflake.com/en/user-guide/snowsql-start)）。
+TODO: `snow`と`snowsql`それぞれの認証情報の渡し方の違いを整理する。特に、`snow`は秘密鍵の中身をそのまま環境変数`SNOWFLAKE_PRIVATE_KEY_RAW`に渡せるのに対し、`snowsql`は秘密鍵をファイルパス（`--private-key-path`）でしか受け取れない、という非対称性を書く（[snowコマンドの公式ドキュメント](https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/configure-connections)、[snowsqlの公式ドキュメント](https://docs.snowflake.com/en/user-guide/snowsql-start)）。この非対称性と、`snowsql`がレガシークライアントであることを踏まえ、**`snowsql`側のキーペア認証対応はスコープ外とし、`snow`のキーペア認証対応に絞った**という判断を書く。
 
 ## 既存プラグインを拡張する
 
@@ -42,10 +42,6 @@ TODO: 実際に書いたGoコードを貼る。`Account`/`Username`/`PrivateKey`
 ### `snow`用のExecutable（`snow.go`）を追加する
 
 TODO: パスワード認証・キーペア認証のどちらでも使えるようにした`Uses`の設計と、実際に動かして分かった`CredentialUsage.Optional`の挙動（期待通り「どちらか一方でOK」という動きになったか、ならなかった場合はどう回避したか）を書く。これが本記事のハマりどころの目玉になる想定。
-
-### (発展) `snowsql`側にもキーペア認証を追加する
-
-TODO: 時間内に対応できた場合、秘密鍵を一時ファイルに書き出して`--private-key-path`引数として渡す独自Provisionerの実装を書く。対応できなかった場合はその理由を正直に書く。
 
 ### ローカルでビルド・テストする
 

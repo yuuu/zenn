@@ -34,7 +34,7 @@
 `snow`のパスフレーズ用環境変数が`PRIVATE_KEY_PASSPHRASE`なのか`SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`なのか、ドキュメントの表記だけでは確定できなかった。**実機検証で確定させる項目。**
 :::
 
-この違いにより、**`snow`向けは`provision.EnvVars`だけで完結する**（鍵の中身をそのまま環境変数に渡せるため）一方、**`snowsql`向けは「一時ファイル書き出し＋`--private-key-path`引数追加」という独自Provisionerが必要**になる。後者は前回懸念していた「新規プラグインを自作する場合と同程度の実装コスト」がそのままかかるため、**今回のPRでは`snow`のキーペア認証対応を主目的とし、`snowsql`側のキーペア対応は発展（stretch）扱いとする**。
+この違いにより、**`snow`向けは`provision.EnvVars`だけで完結する**（鍵の中身をそのまま環境変数に渡せるため）一方、**`snowsql`向けは「一時ファイル書き出し＋`--private-key-path`引数追加」という独自Provisionerが必要**になる。`snowsql`はレガシークライアントであり、そこまでのコストをかける価値は無いと判断し、**`snowsql`側のキーペア認証対応はスコープ外とする**。今回のPRは「`snow`のExecutable追加」と「`snow`向けのキーペア認証対応」の2点に絞る。
 
 ### コントリビュートにあたっての制約（前回調査済み、[CONTRIBUTING.md](https://github.com/1Password/shell-plugins/blob/main/CONTRIBUTING.md)より）
 
@@ -138,7 +138,7 @@ func PrivateKey() schema.CredentialType {
 				Optional:            true,
 			},
 		},
-		// snowコマンド向けのデフォルト。snowsqlコマンドで使う場合はExecutable側でProvisionerを上書きする。
+		// snow向け。snowsqlはキーペア認証に非対応のためこのCredentialTypeは使わない。
 		DefaultProvisioner: provision.EnvVars(map[string]sdk.FieldName{
 			"SNOWFLAKE_ACCOUNT":            fieldname.Account,
 			"SNOWFLAKE_USER":               fieldname.Username,
@@ -238,58 +238,7 @@ func New() schema.Plugin {
 }
 ```
 
-## 5. (発展/stretch) `snowsql`側にもキーペア認証を追加する
-
-時間が許せば、`snowsql`の`Uses`にも`privatekey`を追加する。ただしこちらは`snow`と違い秘密鍵をファイルとして渡す必要があるため、独自のProvisionerを書く。
-
-```go
-package snowflake
-
-import (
-	"context"
-
-	"github.com/1Password/shell-plugins/sdk"
-	"github.com/1Password/shell-plugins/sdk/schema/fieldname"
-)
-
-type snowsqlPrivateKeyProvisioner struct{}
-
-func (snowsqlPrivateKeyProvisioner) Description() string {
-	return "Provisions Snowflake key pair credentials for snowsql via a temporary key file"
-}
-
-func (snowsqlPrivateKeyProvisioner) Provision(ctx context.Context, in sdk.ProvisionInput, out *sdk.ProvisionOutput) {
-	out.AddEnvVar("SNOWSQL_ACCOUNT", in.ItemFields[fieldname.Account])
-	out.AddEnvVar("SNOWSQL_USER", in.ItemFields[fieldname.Username])
-	if passphrase, ok := in.ItemFields[fieldname.Passphrase]; ok && passphrase != "" {
-		out.AddEnvVar("SNOWSQL_PRIVATE_KEY_PASSPHRASE", passphrase)
-	}
-
-	keyPath := in.FromTempDir("rsa_key.p8")
-	out.AddSecretFile(keyPath, []byte(in.ItemFields[fieldname.PrivateKey]))
-	out.AddArgs("--private-key-path", keyPath)
-}
-
-func (snowsqlPrivateKeyProvisioner) Deprovision(ctx context.Context, in sdk.DeprovisionInput, out *sdk.DeprovisionOutput) {
-	// 一時ファイルの削除はSDKが自動で行う。
-}
-```
-
-`snowsql.go`の`Uses`に追記する:
-
-```go
-Uses: []schema.CredentialUsage{
-	{Name: credname.LoginDetails, Optional: true},
-	{Name: "privatekey", Provisioner: snowsqlPrivateKeyProvisioner{}, Optional: true},
-},
-```
-
-:::message
-- `in.ItemFields`のマップのキーが`fieldname.XXX`型でそのままアクセスできるかはSDKの型定義（`sdk.ProvisionInput.ItemFields map[FieldName]string`）を見る限り妥当そうだが、実際にコンパイルが通るかは未確認。**実機検証で確定させる項目。**
-- 時間の都合でこの発展部分は記事に含めない可能性がある。**採用するかも含めて実機検証で確定させる。**
-:::
-
-## 6. スキーマの検証・テスト・ローカルビルド
+## 5. スキーマの検証・テスト・ローカルビルド
 
 ```sh
 make snowflake/validate
@@ -320,7 +269,7 @@ CIでは[golangci-lint](https://github.com/1Password/shell-plugins/blob/main/Mak
 make lint
 ```
 
-## 7. 1Passwordにアイテムを登録して動かしてみる
+## 6. 1Passwordにアイテムを登録して動かしてみる
 
 ```sh
 op plugin init snow
@@ -333,7 +282,7 @@ op plugin init snow
 
 `op plugin init`実行後、`~/.config/op/plugins.sh`（または同等のファイル）に`alias snow="op plugin run -- snow"`が書き込まれるので、これを`.zshrc`/`.bashrc`（`fish`の場合は`config.fish`）に`source`する設定を行い、新しいターミナルセッションで`snow`と打つだけでプラグイン経由になることを確認する（[AWS CLI/CDKの記事](https://dev.classmethod.jp/articles/1password-shell-plugins-aws-cli-cdk/)と同じ体験）。
 
-## 8. Snowflake CLIから実際に接続して動作確認する
+## 7. Snowflake CLIから実際に接続して動作確認する
 
 ```sh
 # パスワード認証で登録した場合
@@ -355,7 +304,7 @@ op plugin run -- snow sql -q "SELECT CURRENT_USER(), CURRENT_ACCOUNT();"
 env | grep SNOWFLAKE
 ```
 
-## 9. 複数のSnowflakeアカウントを使い分ける
+## 8. 複数のSnowflakeアカウントを使い分ける
 
 実務では「本番用アカウント」「検証用アカウント」「客先ごとのアカウント」のように、複数のSnowflakeアカウントを切り替えて使うことが多い。1Password Shell Pluginsがこれにどう対応しているかを確認する。
 
@@ -415,7 +364,7 @@ op plugin clear --all -f        # 全スコープの紐付けを一括で強制�
 - グローバルデフォルト未設定時に「毎回選択を促すプロンプトが出る」という挙動は公式ドキュメントの記述からの推測であり、実際にそうなるかは未確認。**実機検証で確定させる項目。**
 :::
 
-## 10. (比較) プラグインを使わない簡易な方法
+## 9. (比較) プラグインを使わない簡易な方法
 
 記事内で「プラグインを使うほどではない場合の代替案」として紹介する候補。実際に試して比較する。
 
@@ -436,7 +385,7 @@ SNOWFLAKE_PRIVATE_KEY_RAW=op://{vault名}/{item名}/private_key
 `op run`方式は1Password Shell Pluginのような「対象コマンドの実行を検知して自動的に認証情報を注入する」仕組みではなく、毎回コマンドの前に`op run --`を付ける必要がある点がプラグイン方式との違い。この体験差を実際に両方試して記事内で比較する。
 :::
 
-## 11. Pull Requestを作成する
+## 10. Pull Requestを作成する
 
 手順6のテスト・ビルドが通ったら、本家へPRを出す。**新規プラグインの追加ではなく既存プラグインへの機能追加**であることをPRタイトル・本文で明確にする。
 
@@ -452,7 +401,7 @@ gh pr create \
 ## Summary
 - The existing Snowflake plugin only supports the legacy `snowsql` CLI with password authentication.
 - Snowflake now recommends the modern `snow` CLI (Snowflake CLI) for new projects; this PR adds `snow` as a second supported executable.
-- Adds a new `privatekey` credential type for key pair authentication, usable with `snow` (and optionally `snowsql`, which requires the key to be written to a temporary file).
+- Adds a new `privatekey` credential type for key pair authentication, usable with `snow` (the legacy `snowsql` CLI still only supports password authentication via this plugin).
 
 ## Example command that requires authentication
 snow sql -q "SELECT CURRENT_USER();"
@@ -466,7 +415,7 @@ EOF
 - CONTRIBUTING.mdの「📣 Contributions Beta Notice」には、Shell Pluginsのエコシステムがまだベータであり、**ローカルでビルドしたプラグインは1Password CLIの更新に追従して随時再ビルドが必要になりうる**、という趣旨が明記されている（PRのレビュー期間そのものについての言及ではない）。レビューにどの程度時間がかかるか・手直しを求められるかは記事執筆時点で実際にPRを出してみないと分からない。**実機検証（PRを実際に出してからのやり取り）で確定させる項目。** 記事執筆時点でPRがマージされていない場合は、その旨と「レビュー中」であることを正直に書く。
 :::
 
-## 12. クリーンアップ
+## 11. クリーンアップ
 
 PRは開いたままにする（フォーク・ブランチは削除しない）。ローカル環境の検証用リソースのみ後片付けする。
 
@@ -484,13 +433,13 @@ op item delete "{検証用に作成したアイテム名}" --vault {vault名}
 
 Snowflake側で検証用に作成したユーザー・公開鍵がある場合、検証後にパスワードのリセット/無効化・公開鍵の削除をしておく。
 
-## 13. 記事執筆
+## 12. 記事執筆
 
 - [ ] `articles/snowflake-cli-1password-shell-plugin.md`の各セクションを実際の実行結果・つまずいた点で埋める
 - [ ] 記事冒頭で「最初は新規プラグインを自作しようとしたが、既存プラグインを拡張する方が良いと判断した」という方針転換の経緯自体を書く（読者にとって学びが多いはず）
 - [ ] `CredentialUsage.Optional`でパスワード/キーペアの両対応がうまくいったか、うまくいかなかった場合はどう回避したかを書く（読者にとって一番価値のある「ハマりどころ」になりうる）
 - [ ] 手順9の複数アカウント切り替え（ディレクトリスコープ／セッションスコープ／グローバルデフォルトの使い分け、`snow`自体のコネクション機能との役割分担）の結論を反映する
-- [ ] `snowsql`側のキーペア対応（手順5）を採用したかどうかに応じて目次を調整する
+- [ ] `snowsql`側のキーペア対応はスコープ外とした旨（レガシークライアントであり対応コストに見合わないと判断した経緯）を「はじめに」または該当箇所で触れる
 - [ ] 手順10で出したPRへのリンクを記事に追記する。公開時点でマージ済みか、レビュー中かの状態も明記する
 - [ ] `snowflake-cli-oauth.md`との違い（OAuth vs パスワード/キーペア認証、かつ「認証情報そのものをどう安全に扱うか」という切り口の違い）を「はじめに」で明記する
 - [ ] `published: true`にして公開日を設定する

@@ -5,7 +5,6 @@ type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
   - snowflake
   - semanticview
-  - cortex
 published: false
 publication_name: fusic
 ---
@@ -20,9 +19,11 @@ https://docs.snowflake.com/ja/user-guide/views-semantic/overview
 生のテーブル・カラム名の代わりに、業務で使う言葉でデータを問い合わせられるようになります。
 
 本記事では商品マスタ・売上データを例に、Semantic Viewを実際に作成します。
-そして、 `SELECT * FROM SEMANTIC_VIEW(...)`構文や標準SQL構文で問い合わせたときの挙動を検証します。
+そして、`SELECT * FROM SEMANTIC_VIEW(...)`構文や標準SQL構文で問い合わせたときの挙動を検証します。
 
 加えて、「Claude Desktopとの連携を見据え、`WITH SYNONYMS`・`COMMENT`を使って日本語の意味づけをした際の効果」も検証します。
+
+![](/images/snowflake-semantic-view-sales-data/004.png)
 
 ## 事前準備
 
@@ -33,6 +34,7 @@ https://zenn.dev/fusic/articles/snowflake-cli-install-with-mise
 https://zenn.dev/fusic/articles/snowflake-cli-oauth
 
 検証用のデータベース・スキーマ・ウェアハウスを作るクエリを`setup_schema.sql`として保存し、`snow` コマンドで実行します。
+Connection名が `oauth` である前提で記載しているので、適宜置き換えてください。
 
 ```sql:setup_schema.sql
 USE ROLE ACCOUNTADMIN;
@@ -52,7 +54,7 @@ snow sql -f setup_schema.sql -c oauth
 
 ## サンプルデータを投入する
 
-商品マスタ10件・売上明細500件（乱数生成）を投入するためのクエリを`seed_data.sql`として保存し、 `snow` コマンドで実行します。
+商品マスタ10件・売上明細500件（乱数生成）を投入するためのクエリを`seed_data.sql`として保存し、`snow` コマンドで実行します。
 
 ```sql:seed_data.sql
 USE ROLE ACCOUNTADMIN;
@@ -76,16 +78,16 @@ CREATE OR REPLACE TABLE sales (
 );
 
 INSERT INTO product_master (product_id, product_name, category, unit_price) VALUES
-  (1, 'ノートパソコン',              'PC',        120000),
-  (2, 'ワイヤレスマウス',            '周辺機器',   2500),
-  (3, 'メカニカルキーボード',        '周辺機器',   8000),
-  (4, '4Kモニター',                  'PC',        35000),
+  (1, 'ノートパソコン', 'PC', 120000),
+  (2, 'ワイヤレスマウス', '周辺機器', 2500),
+  (3, 'メカニカルキーボード', '周辺機器', 8000),
+  (4, '4Kモニター', 'PC', 35000),
   (5, 'ノイズキャンセリングヘッドホン', 'オーディオ', 28000),
-  (6, 'USB-Cハブ',                   '周辺機器',   4500),
-  (7, 'Webカメラ',                   '周辺機器',   6000),
-  (8, 'デスクライト',                '什器',      3200),
-  (9, 'オフィスチェア',              '什器',      45000),
-  (10, 'ポータブルSSD',              'ストレージ', 15000);
+  (6, 'USB-Cハブ', '周辺機器', 4500),
+  (7, 'Webカメラ', '周辺機器', 6000),
+  (8, 'デスクライト', '什器', 3200),
+  (9, 'オフィスチェア', '什器', 45000),
+  (10, 'ポータブルSSD', 'ストレージ', 15000);
 
 -- 直近180日分をランダムに散らした売上を500件生成
 INSERT INTO sales (sale_id, product_id, sold_at, quantity, amount)
@@ -200,11 +202,13 @@ snow sql -f create_semantic_view.sql -c oauth
 
 作成したSemantic Viewは次のような内容となっています。
 
-- TABLES: 物理テーブル（`product_master`/`sales`）に`products`/`sales`という論理名を与える。
-- RELATIONSHIPS: `sales.product_id`が`products.product_id`を参照する結合キーを定義する。以降のFACTS/DIMENSIONS/METRICSでJOINを書かずに両テーブルの列を扱えるようになる。
-- FACTS: 集計前の行レベルの数値（1明細あたりの金額・数量）を定義する。
-- DIMENSIONS: 集計の軸になる属性（商品名・カテゴリ・販売日）を定義する。`DATE_TRUNC('MONTH', sales.sold_at)`のように式で定義することもできる。
-- METRICS: `SUM`/`AVG`/`COUNT`などで集計済みのKPIを定義する。
+| 句 | 役割 |
+| --- | --- |
+| TABLES | 物理テーブル（`product_master`/`sales`）に`products`/`sales`という論理名を与える |
+| RELATIONSHIPS | `sales.product_id`が`products.product_id`を参照する結合キーを定義する。以降のFACTS/DIMENSIONS/METRICSでJOINを書かずに両テーブルの列を扱えるようになる |
+| FACTS | 集計前の行レベルの数値（1明細あたりの金額・数量）を定義する |
+| DIMENSIONS | 集計の軸になる属性（商品名・カテゴリ・販売日）を定義する。`DATE_TRUNC('MONTH', sales.sold_at)`のように式で定義することもできる |
+| METRICS | `SUM`/`AVG`/`COUNT`などで集計済みのKPIを定義する |
 
 念のため、次のクエリで定義内容を確認します。
 
@@ -212,48 +216,7 @@ snow sql -f create_semantic_view.sql -c oauth
 snow sql -q "DESC SEMANTIC VIEW semantic_view_demo_db.sales_schema.sales_semantic_view;" -c oauth
 ```
 
-| OBJECT_KIND | OBJECT_NAME | PARENT_ENTITY | PROPERTY | PROPERTY_VALUE |
-| --- | --- | --- | --- | --- |
-| (なし) | (なし) | (なし) | COMMENT | 商品マスタと売上明細を組み合わせた販売分析用Semantic View |
-| TABLE | PRODUCTS | | BASE_TABLE_DATABASE_NAME | SEMANTIC_VIEW_DEMO_DB |
-| TABLE | PRODUCTS | | BASE_TABLE_SCHEMA_NAME | SALES_SCHEMA |
-| TABLE | PRODUCTS | | BASE_TABLE_NAME | PRODUCT_MASTER |
-| TABLE | PRODUCTS | | SYNONYMS | ["商品マスタ","product master"] |
-| TABLE | PRODUCTS | | PRIMARY_KEY | ["PRODUCT_ID"] |
-| TABLE | PRODUCTS | | COMMENT | 商品マスタ |
-| DIMENSION | CATEGORY | PRODUCTS | EXPRESSION | products.category |
-| DIMENSION | CATEGORY | PRODUCTS | SYNONYMS | ["カテゴリ","category"] |
-| DIMENSION | CATEGORY | PRODUCTS | COMMENT | 商品カテゴリ |
-| DIMENSION | PRODUCT_NAME | PRODUCTS | EXPRESSION | products.product_name |
-| DIMENSION | PRODUCT_NAME | PRODUCTS | SYNONYMS | ["商品名","product name"] |
-| DIMENSION | PRODUCT_NAME | PRODUCTS | COMMENT | 商品名 |
-| METRIC | PRODUCT_COUNT | PRODUCTS | EXPRESSION | COUNT(products.product_id) |
-| METRIC | PRODUCT_COUNT | PRODUCTS | COMMENT | 商品数 |
-| TABLE | SALES | | BASE_TABLE_NAME | SALES |
-| TABLE | SALES | | SYNONYMS | ["売上明細","sales data"] |
-| TABLE | SALES | | PRIMARY_KEY | ["SALE_ID"] |
-| TABLE | SALES | | COMMENT | 売上明細（1行 = 1販売レコード） |
-| RELATIONSHIP | SALES_TO_PRODUCTS | SALES | REF_TABLE | PRODUCTS |
-| RELATIONSHIP | SALES_TO_PRODUCTS | SALES | FOREIGN_KEY | ["PRODUCT_ID"] |
-| RELATIONSHIP | SALES_TO_PRODUCTS | SALES | REF_KEY | ["PRODUCT_ID"] |
-| FACT | SALE_AMOUNT | SALES | EXPRESSION | sales.amount |
-| FACT | SALE_AMOUNT | SALES | COMMENT | 1明細あたりの売上金額 |
-| FACT | SALE_QUANTITY | SALES | EXPRESSION | sales.quantity |
-| FACT | SALE_QUANTITY | SALES | COMMENT | 1明細あたりの販売数量 |
-| DIMENSION | SOLD_DATE | SALES | EXPRESSION | sales.sold_at |
-| DIMENSION | SOLD_DATE | SALES | COMMENT | 販売日 |
-| DIMENSION | SOLD_MONTH | SALES | EXPRESSION | DATE_TRUNC('MONTH', sales.sold_at) |
-| DIMENSION | SOLD_MONTH | SALES | COMMENT | 販売月（月初日） |
-| METRIC | AVERAGE_AMOUNT | SALES | EXPRESSION | AVG(sales.sale_amount) |
-| METRIC | AVERAGE_AMOUNT | SALES | COMMENT | 1明細あたりの平均売上金額 |
-| METRIC | TOTAL_AMOUNT | SALES | EXPRESSION | SUM(sales.sale_amount) |
-| METRIC | TOTAL_AMOUNT | SALES | COMMENT | 売上金額の合計 |
-| METRIC | TOTAL_QUANTITY | SALES | EXPRESSION | SUM(sales.sale_quantity) |
-| METRIC | TOTAL_QUANTITY | SALES | COMMENT | 販売数量の合計 |
-
-（`DATA_TYPE`・`ACCESS_MODIFIER`など一部のプロパティは表から省略）
-
-TABLES/RELATIONSHIPS/FACTS/DIMENSIONS/METRICSがすべて意図通り登録されていることが確認できています。
+TABLES/RELATIONSHIPS/FACTS/DIMENSIONS/METRICSがすべて意図通り登録されていることが確認できるはずです。
 
 ## Semantic Viewに問い合わせる
 
@@ -341,7 +304,7 @@ ORDER BY total_amount DESC;
 
 Claude Desktopから問い合わせられるようにするため、MCPサーバーを準備します。
 
-MCPサーバーを構築するクエリを `setup_mcp.sql`として保存します。
+MCPサーバーを構築するクエリを`setup_mcp.sql`として保存します。
 加えてここでは、Claude Desktopからの接続専用ロールを作成し、必要な権限だけを与えています。
 そのロールを使用して汎用のSQL実行ツールを持つMCPサーバーを作成します。
 
@@ -385,11 +348,11 @@ GRANT USAGE ON MCP SERVER semantic_view_demo_db.sales_schema.sales_analysis_mcp 
 snow sql -f setup_mcp.sql -c oauth --warehouse semantic_view_demo_wh
 
 snow sql -c oauth --silent --format json \
-  -q "SELECT 'https://' || REPLACE || '.snowflakecomputing.com/api/v2/databases/semantic_view_demo_db/schemas/sales_schema/mcp-servers/sales_analysis_mcp' AS mcp_server_url;" \
+  -q "SELECT 'https://' || REPLACE(CURRENT_ORGANIZATION_NAME() || '-' || CURRENT_ACCOUNT_NAME(), '_', '-') || '.snowflakecomputing.com/api/v2/databases/semantic_view_demo_db/schemas/sales_schema/mcp-servers/sales_analysis_mcp' AS mcp_server_url;" \
   | jq -r '.[0].MCP_SERVER_URL'
 ```
 
-Claude DesktopからこのMCPサーバーに接続するためのOAuthセキュリティ統合を作成する。
+Claude DesktopからこのMCPサーバーに接続するためのOAuthセキュリティ統合を作成します。
 `setup_mcp_oauth.sql`として保存します。
 
 ```sql:setup_mcp_oauth.sql
@@ -422,7 +385,7 @@ snow sql -c oauth --silent --format json \
 
 シノニムをまだ追加していない状態（手順3で最初に作ったSemantic View）のまま、素直に日本語で質問してみました。
 
-今回は**「客単価を教えて」**という質問をしてみました。
+今回は **「客単価を教えて」** という質問をしてみました。
 結果は、次のような回答でした。
 
 > SALESテーブル（SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES、全500件）を集計した結果です。
@@ -432,7 +395,7 @@ snow sql -c oauth --silent --format json \
 > 客単価（1取引あたり平均金額）: 約85,755.8円
 
 数値自体は正しいものの、実際に実行されたSQLを確認すると次の内容で、Semantic Viewは使用されていませんでした。
-`sales_semantic_view`というSemantic Viewの存在に気づかないまま、生の`SALES`テーブルを直接調べて自力で集計してたようです。
+`sales_semantic_view`というSemantic Viewの存在に気づかないまま、生の`SALES`テーブルを直接調べて自力で集計していたようです。
 
 ```sql
 SELECT * FROM SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES LIMIT 10;
@@ -441,9 +404,16 @@ SELECT COUNT(*) AS sale_count, SUM(AMOUNT) AS total_amount, AVG(AMOUNT) AS avg_a
 FROM SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES;
 ```
 
+そこで次は **「Semantic Viewを使って客単価を教えて」** と問い合わせてみることにしました。
+次のような結果が返ってきました。
+
+![](/images/snowflake-semantic-view-sales-data/003.png)
+
+こちらも正しく計算はできているのですが、「客単価」の計算方法はClaudeが勝手に解釈しているようです。
+
 ### シノニムを追加する前後で回答精度を比較する
 
-シノニムは`add_synonyms.sql`として保存し、追加した。
+シノニムは`add_synonyms.sql`として保存し、追加しました。
 
 ```sql:add_synonyms.sql
 USE ROLE ACCOUNTADMIN;
@@ -510,20 +480,9 @@ snow sql -f add_synonyms.sql -c oauth
 
 ### 再度日本語で問い合わせる
 
-前回の結果を踏まえ、質問の仕方を変えて**「Semantic Viewを使って客単価を教えて」**と問い合わせてみた。
+再度、 **「Semantic Viewを使って客単価を教えて」** と問い合わせてみました。
 
-**SYNONYMSに「客単価」を追加した状態（After）で指示した場合**
-
-```
-Snowflakeのカスタムコネクタで Semantic View を使って客単価を集計します。まずツールをロードして、
-利用可能な Semantic View を確認します。
-
-SALES_SEMANTIC_VIEW が見つかりました。次に定義（メトリクス・ディメンション）を確認します。
-
-AVERAGE_AMOUNT（客単価/AVG(sales.sale_amount)）というメトリクスが定義されているので、これを使って集計します。
-
-客単価: 85,755.80円
-```
+![](/images/snowflake-semantic-view-sales-data/004.png)
 
 Semantic Viewを発見 → `DESC SEMANTIC VIEW`相当でメタデータを確認し、`AVERAGE_AMOUNT`のCOMMENT・SYNONYMSから「客単価」に対応すると判断、という流れで正しいメトリクスに辿り着いていることがわかります。
 回答の内容もシンプルですし、思考が最小限で済む分、回答までにかかる時間も速かったです。

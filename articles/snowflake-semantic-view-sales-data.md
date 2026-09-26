@@ -1,17 +1,19 @@
 ---
-title: "商品の販売データを例にSnowflake Semantic Viewの活用方法を考えてみる"
+title: "Snowflake Semantic Viewの効果を商品の販売データを例に検証する"
 emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
   - snowflake
   - semanticview
-published: false
+  - claude
+published: true
+published_at: "2026-09-28 07:30"
 publication_name: fusic
 ---
 
 ## はじめに
 
-SnowflakeのSemantic View はテーブルやカラムに対して「商品名」「売上合計」のようなビジネス用語での意味を持たせる機能です。
+SnowflakeのSemantic Viewは、テーブルやカラムに業務的な名前・説明を与えたり、「売上合計」「客単価」のような集計をあらかじめメトリクスとして定義したりできる機能です。
 2025年6月にGAし、その後も機能拡充が続いています。
 
 https://docs.snowflake.com/ja/user-guide/views-semantic/overview
@@ -302,6 +304,8 @@ ORDER BY total_amount DESC;
 
 ## Claude Desktopから自然言語で問い合わせる
 
+### MCPサーバーの準備
+
 Claude Desktopから問い合わせられるようにするため、MCPサーバーを準備します。
 
 MCPサーバーを構築するクエリを`setup_mcp.sql`として保存します。
@@ -383,26 +387,13 @@ snow sql -c oauth --silent --format json \
 
 ### 日本語で問い合わせる
 
-シノニムをまだ追加していない状態（手順3で最初に作ったSemantic View）のまま、素直に日本語で質問してみました。
-
-今回は **「客単価を教えて」** という質問をしてみました。
+今回は一例として **「客単価を教えて」** という質問をしてみました。
 結果は、次のような回答でした。
 
-> SALESテーブル（SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES、全500件）を集計した結果です。
->
-> 取引件数: 500件
-> 売上合計: 42,877,900円
-> 客単価（1取引あたり平均金額）: 約85,755.8円
+![](/images/snowflake-semantic-view-sales-data/002.png)
 
 数値自体は正しいものの、実際に実行されたSQLを確認すると次の内容で、Semantic Viewは使用されていませんでした。
 `sales_semantic_view`というSemantic Viewの存在に気づかないまま、生の`SALES`テーブルを直接調べて自力で集計していたようです。
-
-```sql
-SELECT * FROM SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES LIMIT 10;
-
-SELECT COUNT(*) AS sale_count, SUM(AMOUNT) AS total_amount, AVG(AMOUNT) AS avg_amount
-FROM SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES;
-```
 
 そこで次は **「Semantic Viewを使って客単価を教えて」** と問い合わせてみることにしました。
 次のような結果が返ってきました。
@@ -410,6 +401,7 @@ FROM SEMANTIC_VIEW_DEMO_DB.SALES_SCHEMA.SALES;
 ![](/images/snowflake-semantic-view-sales-data/003.png)
 
 こちらも正しく計算はできているのですが、「客単価」の計算方法はClaudeが勝手に解釈しているようです。
+若干思考のコストがかかっていることも見て取れます。
 
 ### シノニムを追加する前後で回答精度を比較する
 
@@ -478,13 +470,16 @@ CREATE OR REPLACE SEMANTIC VIEW sales_semantic_view
 snow sql -f add_synonyms.sql -c oauth
 ```
 
+これで`AVERAGE_AMOUNT`が「客単価」を指すことがAIに伝わるようになりました。
+
 ### 再度日本語で問い合わせる
 
-再度、 **「Semantic Viewを使って客単価を教えて」** と問い合わせてみました。
+再度、 **「Semantic Viewを使って客単価を教えて」** と問い合わせてみます。
 
 ![](/images/snowflake-semantic-view-sales-data/004.png)
 
 Semantic Viewを発見 → `DESC SEMANTIC VIEW`相当でメタデータを確認し、`AVERAGE_AMOUNT`のCOMMENT・SYNONYMSから「客単価」に対応すると判断、という流れで正しいメトリクスに辿り着いていることがわかります。
+
 回答の内容もシンプルですし、思考が最小限で済む分、回答までにかかる時間も速かったです。
 
 ## おわりに

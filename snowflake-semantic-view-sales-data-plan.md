@@ -8,7 +8,8 @@ Snowflake CLIのみで完結させる。以下のSQLをそのままファイル�
 
 サンプルデータは[snowflake-managed-mcp-claude-desktop-plan.md](snowflake-managed-mcp-claude-desktop-plan.md)の`mcp_demo_db.sales_schema`と同じ構造（商品マスタ・売上）を採用しつつ、Semantic View単体で完結する検証にするため、データベースは独立させた（`semantic_view_demo_db`）。MCP記事が先に公開されている場合は、本文中で「以前MCPサーバーの記事で使ったのと同じデータです」と触れる程度に留める。
 
-**記事の軸**: 今回はSemantic Viewの構文紹介だけで終わらせず、「Cortex Analyst（自然言語AI）から使うことを見据えて、`WITH SYNONYMS`・`COMMENT`を日本語でどう設計すると問い合わせ精度が変わるか」を検証の中心に据える。手順3で日本語での意味付けの設計方針を、手順5でCortex Analystへの日本語自然言語問い合わせの精度がシノニム追加の前後でどう変わるかをBefore/Afterで確認する。
+**記事の軸**: 今回はSemantic Viewの構文紹介だけで終わらせず、「自然言語AI（Claude Desktop）から使うことを見据えて、`WITH SYNONYMS`・`COMMENT`を日本語でどう設計すると問い合わせ精度が変わるか」を検証の中心に据える。手順3で日本語での意味付けの設計方針を、手順5でClaude Desktopへの日本語自然言語問い合わせの精度がシノニム追加の前後でどう変わるかをBefore/Afterで確認する。
+Cortex Analyst専用のMCPツールは使わず、既存の汎用SQL実行MCPサーバー経由でClaude Desktop自身にSemantic Viewのメタデータを読ませて問い合わせさせる。
 
 ## 0. 前提確認
 
@@ -48,6 +49,9 @@ GRANT USAGE ON WAREHOUSE semantic_view_demo_wh TO ROLE semantic_view_demo_role;
 -- Semantic Viewを作成するための権限
 GRANT CREATE SEMANTIC VIEW ON SCHEMA semantic_view_demo_db.sales_schema TO ROLE semantic_view_demo_role;
 GRANT CREATE TABLE ON SCHEMA semantic_view_demo_db.sales_schema TO ROLE semantic_view_demo_role;
+
+-- Claude Desktopから問い合わせるためのMCPサーバーを作成するための権限
+GRANT CREATE MCP SERVER ON SCHEMA semantic_view_demo_db.sales_schema TO ROLE semantic_view_demo_role;
 
 -- 自分のユーザーにロールを付与
 GRANT ROLE semantic_view_demo_role TO USER {ユーザー名};
@@ -301,65 +305,72 @@ LIMIT 10;
 2026年3月2日に「標準SQLでSemantic Viewを問い合わせる」機能がGAになっており、`SELECT * FROM SEMANTIC_VIEW(...)`という専用構文を使わずに`SELECT category, AGG(total_amount) FROM sales_semantic_view GROUP BY category`のような書き方もできるらしい。**実機検証で確定させる項目。** どちらの構文の方が記事として説明しやすいか、また実際に動くかを確認し、記事では両方または片方を採用する。
 :::
 
-## 5. Cortex AnalystからSemantic Viewを使う（発展）
+## 5. Claude DesktopからSemantic Viewを使う（発展）
 
-Semantic ViewはCortex Analystのセマンティックモデルとしてそのまま利用できる。[MCPサーバーの記事](articles/snowflake-managed-mcp-claude-desktop.md)と絡めて、Claude DesktopからSemantic View経由で自然言語問い合わせができるか確認する。
+Cortex Analyst専用のMCPツール（`CORTEX_ANALYST_MESSAGE`タイプ）は今回は作らない。
+汎用のSQL実行MCPサーバー（`SYSTEM_EXECUTE_SQL`タイプ）を今回の検証環境専用に新規作成し、Claude Desktopに自然言語で問い合わせて、Claude Desktop自身（＝ClaudeというLLM自体の読解力）が`SEMANTIC_VIEW(...)`構文や標準SQL構文のクエリを正しく組み立てられるかを確認する。
+Claude Desktop側のOAuth接続設定など、MCPサーバーへの接続手順自体は本記事では扱わない（[MCPサーバーの記事](articles/snowflake-managed-mcp-claude-desktop.md)を参照）。
 
-`add_cortex_analyst_tool.sql` として保存する。
+`setup_mcp.sql` として保存する。
 
 ```sql
 USE ROLE semantic_view_demo_role;
 
--- Semantic ViewをCortex Analystのツールとして公開するMCPサーバーを作る
-CREATE OR REPLACE MCP SERVER semantic_view_demo_db.sales_schema.sales_semantic_mcp
+CREATE OR REPLACE MCP SERVER semantic_view_demo_db.sales_schema.sales_analysis_mcp
   FROM SPECIFICATION $$
 tools:
-  - name: "sales-semantic-view"
-    type: "CORTEX_ANALYST_MESSAGE"
-    identifier: "semantic_view_demo_db.sales_schema.sales_semantic_view"
-    title: "Sales Semantic View"
-    description: "商品マスタと売上明細を組み合わせたSemantic Viewに対して自然言語で問い合わせるツール"
+  - name: "execute_sql"
+    type: "SYSTEM_EXECUTE_SQL"
+    title: "Sales Data SQL Execution"
+    description: "product_master/salesテーブル、およびsales_semantic_view（Semantic View）に対してSELECT文を実行し、売上の集計・分析を行うためのツール"
+    config:
+      read_only: true
+      query_timeout: 120
+      warehouse: "semantic_view_demo_wh"
 $$;
 
-GRANT USAGE ON MCP SERVER semantic_view_demo_db.sales_schema.sales_semantic_mcp TO ROLE semantic_view_demo_role;
+GRANT USAGE ON MCP SERVER semantic_view_demo_db.sales_schema.sales_analysis_mcp TO ROLE semantic_view_demo_role;
 GRANT SELECT ON SEMANTIC VIEW semantic_view_demo_db.sales_schema.sales_semantic_view TO ROLE semantic_view_demo_role;
 ```
 
 実行:
 
 ```sh
-snow sql -f add_cortex_analyst_tool.sql -c oauth
+snow sql -f setup_mcp.sql -c oauth
 ```
+
+:::message
+`CREATE MCP SERVER`にはスキーマに対する`CREATE MCP SERVER`権限が必要。手順1のGRANT文に追加済み。
+:::
 
 確認:
 
 ```sh
-snow sql -q "SHOW MCP SERVERS LIKE 'sales_semantic_mcp' IN SCHEMA semantic_view_demo_db.sales_schema;" -c oauth
-snow sql -q "DESC MCP SERVER semantic_view_demo_db.sales_schema.sales_semantic_mcp;" -c oauth
+snow sql -q "SHOW MCP SERVERS LIKE 'sales_analysis_mcp' IN SCHEMA semantic_view_demo_db.sales_schema;" -c oauth
 ```
 
-Claude Desktop側の接続手順（OAuthセキュリティ統合の作成、コネクタ追加、Redirect URIの扱いなど）は[MCPサーバーの記事の手順3〜6](snowflake-managed-mcp-claude-desktop-plan.md)と同じなので、そちらで検証済みのOAuthセキュリティ統合・コネクタを流用するか、本記事用に別途作る場合は同じ手順を踏む。
+あとはClaude Desktop側のプロンプトのみで検証する。
 
 ### 5-1. 質問例（そのまま自然言語で聞いてみる）
 
-Cortex Analyst経由で自然言語からSemantic Viewを引けているか確認する。
+Claude Desktop（Cortex Analystは介さず、Claude自身がSemantic Viewのメタデータを読んでSQLを組み立てる）が自然言語からSemantic Viewを正しく引けているか確認する。
 
 - 「カテゴリ別の売上合計を教えて」
 - 「直近3ヶ月の売上推移を月ごとに見せて」
 - 「周辺機器の中で平均単価が一番高い商品は？」
 
-それぞれの質問に対してClaude Desktopが実行したツール呼び出し（生成されたSemantic Viewへの問い合わせ内容）を確認し、意図通りのDIMENSIONS/METRICSが選ばれているかチェックする。
+それぞれの質問に対してClaude Desktopが実行したツール呼び出し（生成されたSQL、`SEMANTIC_VIEW(...)`構文か標準SQL構文か）を確認し、意図通りのDIMENSIONS/METRICSが選ばれているかチェックする。
 
 ### 5-2. 日本語シノニムの追加前後で回答精度を比較する（Before/After）
 
-手順3のDDLでは意図的に「客単価」（`sales.average_amount`のシノニム）と「商品ジャンル」（`products.category`のシノニム）を`WITH SYNONYMS`に含めていない。この状態とSYNONYMSを追加した後とで、Cortex Analystの回答精度がどう変わるかを比較する。
+手順3のDDLでは意図的に「客単価」（`sales.average_amount`のシノニム）と「商品ジャンル」（`products.category`のシノニム）を`WITH SYNONYMS`に含めていない。この状態とSYNONYMSを追加した後とで、Claude Desktopの回答精度がどう変わるかを比較する。
 
 **Before（シノニム追加前）**: Claude Desktopで次の質問をし、回答・生成されたツール呼び出しを記録する。
 
 - 「客単価を教えて」（`average_amount`というメトリクス名ともCOMMENT文言とも表記が異なる業務用語）
 - 「商品ジャンルごとの売上を見せて」（`category`というディメンション名とは異なる言い回し）
 
-確認観点: COMMENTの説明文（自然文）だけを手がかりに、SYNONYMSに登録されていない言い回しでも正しいメトリクス/ディメンションに辿り着けるか。辿り着けない場合、Cortex Analystはどのような回答をするか（「該当する項目が見つかりません」等になるか、あるいは誤ったメトリクスを選んでしまうか）を記録する。
+確認観点: COMMENTの説明文（自然文）だけを手がかりに、SYNONYMSに登録されていない言い回しでも正しいメトリクス/ディメンションに辿り着けるか。辿り着けない場合、Claude Desktopはどのような回答をするか（「該当する項目が見つかりません」等になるか、あるいは誤ったメトリクスを選んでしまうか）を記録する。
 
 **シノニムを追加する**: `add_synonyms.sql` として保存する。
 
@@ -408,10 +419,8 @@ snow sql -q "DESC SEMANTIC VIEW semantic_view_demo_db.sales_schema.sales_semanti
 確認観点: SYNONYMS追加によって、Before時点で曖昧だった／失敗していた問い合わせが安定して正しいメトリクス・ディメンションに解決されるようになるか。LLMの応答は毎回決定的とは限らないため、余裕があれば同じ質問を複数回（3回程度）試して再現性も見ておく。
 
 :::message
-- `CORTEX_ANALYST_MESSAGE`タイプのMCPツールを既存の`SYSTEM_EXECUTE_SQL`タイプのMCPサーバーと同じMCPサーバー内に共存させられるか、それとも別サーバーに分ける必要があるかは未確認。**実機検証で確定させる項目。**
-- Cortex Analystは2026年8月28日付でCortex Agentsへの移行が推奨されている（REST APIとしては引き続き利用可能）。MCPサーバーの`CORTEX_ANALYST_MESSAGE`タイプが内部的にどちらを使っているか、挙動に差が出るかは記事執筆時点のドキュメントからは断定できない。**実機検証で確定させる項目。**
 - LLMの回答は非決定的なため、Before/Afterの差が「シノニムを追加したから」なのか「たまたま」なのかの切り分けが難しい可能性がある。複数回試行して傾向として差が見えるかで判断する。
-- この節はSemantic View単体の記事としては発展的内容のため、実機検証がうまくいかない・時間が取れない場合は記事から削って手順4までの内容に絞ることも検討する。ただし5-2の日本語シノニムの効果検証は本記事の目玉でもあるため、MCP/Cortex Analyst連携自体がうまくいかない場合は、せめて`DESC SEMANTIC VIEW`の出力比較やSemantic View自体の設計論として書く形に切り替える。
+- この節はSemantic View単体の記事としては発展的内容のため、実機検証がうまくいかない・時間が取れない場合は記事から削って手順4までの内容に絞ることも検討する。ただし5-2の日本語シノニムの効果検証は本記事の目玉でもあるため、Claude Desktopとの連携自体がうまくいかない場合は、せめて`DESC SEMANTIC VIEW`の出力比較やSemantic View自体の設計論として書く形に切り替える。
 :::
 
 ## 6. クリーンアップ
@@ -420,7 +429,7 @@ snow sql -q "DESC SEMANTIC VIEW semantic_view_demo_db.sales_schema.sales_semanti
 
 ```sql
 USE ROLE semantic_view_demo_role;
-DROP MCP SERVER IF EXISTS semantic_view_demo_db.sales_schema.sales_semantic_mcp;
+DROP MCP SERVER IF EXISTS semantic_view_demo_db.sales_schema.sales_analysis_mcp;
 DROP SEMANTIC VIEW IF EXISTS semantic_view_demo_db.sales_schema.sales_semantic_view;
 
 USE ROLE SYSADMIN;
@@ -435,15 +444,13 @@ DROP ROLE IF EXISTS semantic_view_demo_role;
 snow sql -f teardown.sql -c oauth
 ```
 
-手順5でMCPサーバー用にOAuthセキュリティ統合やClaude Desktop側のコネクタを別途作った場合は、それらも合わせて削除しておく。
-
 ## 7. 記事執筆
 
-- [ ] `articles/snowflake-semantic-view-sales-data.md` の各セクションを、実際に得られた出力・実行結果で埋める
-- [ ] 手順3の`WITH SYNONYMS`構文の揺れ（TABLES句とDIMENSIONS句での書き方の違い）の結論を反映する
-- [ ] 手順4-3の`WHERE`句が集計前フィルタとして効くかどうかの結論を反映する
-- [ ] 手順4末尾の`:::message`で触れた「標準SQLでの問い合わせ（GA機能）」を試し、記事でどちらの構文を主軸にするか決める
-- [ ] 手順5（Cortex Analyst/MCP連携）が実機で動作するか確認し、動作した場合のみ記事に残す。動作しない・時間が取れない場合は章ごと削って手順4までの内容にスコープを絞る
-- [ ] 手順5-2の「客単価」「商品ジャンル」シノニム追加前後のBefore/Afterの結果（回答・ツール呼び出しの違い）を記事の目玉として反映する。MCP連携自体が動かない場合も、Semantic Viewの設計論（SYNONYMS/COMMENTの役割の違い）としてこの考察は極力残す
+- [x] `articles/snowflake-semantic-view-sales-data.md` の各セクションを、実際に得られた出力・実行結果で埋める
+- [x] 手順3の`WITH SYNONYMS`構文の揺れ（TABLES句とDIMENSIONS句での書き方の違い）の結論を反映する
+- [x] 手順4-3の`WHERE`句が集計前フィルタとして効くかどうかの結論を反映する
+- [x] 手順4末尾の`:::message`で触れた「標準SQLでの問い合わせ（GA機能）」を試し、記事でどちらの構文を主軸にするか決める
+- [x] 手順5（Claude Desktopからの自然言語問い合わせ）が実機で動作するか確認し、記事に反映する
+- [x] 手順5-2のBefore/Afterの結果を記事に反映する。**当初の仮説（SYNONYMS追加で回答精度が変わる）とは異なる結論になった**: 汎用SQL実行ツールではClaude Desktopは指示なしにSemantic Viewを自発的に参照せず生テーブルへ直接SQLを書くため、SYNONYMS単体の有無では回答は変わらなかった。「Semantic Viewを使って」と明示指示すると参照するようになり、その状態ではCOMMENTの自然文だけ（SYNONYMSの完全一致なし）でも正しいメトリクスに辿り着けた。この「LLMがSemantic Viewを参照するかどうか」という一段手前の条件が本質的な発見として記事の目玉になった
 - [ ] `published: true` にして公開日を設定する
 - [ ] 本ファイル（`snowflake-semantic-view-sales-data-plan.md`）は記事完成後に削除する

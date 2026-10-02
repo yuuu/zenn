@@ -1,6 +1,6 @@
 # 検証手順書: Ruby 4 + Rails 8 から Snowflake に ODBC で接続できるか試す
 
-作成日: 2026-10-03 / 実行は未実施(手順書のみ)
+作成日: 2026-10-03 / 実行状況: Step 2(+Step 7のB・C修正)のみ実施済み。Snowflake接続が要るStep 1・3〜6は未実施(2026-10-03時点)
 
 ## 0. 事前調査で分かっていること(2026-10-03時点)
 
@@ -9,7 +9,7 @@
 | Snowflake公式のRubyドライバー | 無い。ODBC / コミュニティgem / SQL APIの3択 | 事実 | https://eng.localytics.com/connecting-to-snowflake-with-ruby-on-rails/ |
 | `snowflake_odbc_adapter` | 最新 7.2.0.1(2024-09-19)、required_ruby_version >= 3.1.0、activerecord >= 7.2、ruby-odbc に依存。READMEは「very early development」「接続は connection string のみ」 | 事実 | https://rubygems.org/gems/snowflake_odbc_adapter / https://github.com/GuillaumeGillet/snowflake_odbc_adapter |
 | README上のruby-odbc | `vhermecz/ruby-odbc` のGitHubフォークをGemfileで指定する案内(元gemがRuby 3+非対応のため) | 事実 | 同上 |
-| `ruby-odbc` 本体 | 最新 0.999992(2024-04-08) | 事実 | https://bundler.rubygems.org/gems/ruby-odbc |
+| `ruby-odbc` 本体 | 最新 0.999993(2026-10-03時点のrubygems。0.999992は2024-04-08) | 事実 | https://bundler.rubygems.org/gems/ruby-odbc |
 | `ruby-odbc-supported` | 「modern Ruby向け互換性修正のフォーク」。1.0.0 / 1.0.1 が 2025-11-14 | 事実(Ruby 4での動作は未確認) | https://rubygems.org/gems/ruby-odbc-supported |
 | Rails 8.1 のRuby要件 | Rails 8.1.2 は Ruby >= 3.2.0, < 4.1.0 | 事実(検索結果の要約) | https://rubygems.org/gems/rails |
 | Snowflake ODBC 4.x (Linux) | x86_64 / aarch64、deb/rpm/tar.gz、unixODBC or iODBC が必要、`isql -v` で確認可 | 事実 | https://docs.snowflake.com/en/developer-guide/odbc/odbc-linux |
@@ -158,13 +158,25 @@ echo "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_VERSION();" | isql -v sf
 - 失敗時: 8章参照。ここで通らない場合はRuby以前の問題。
 
 ### Step 2: ruby-odbc系gemのビルド(Ruby 4)
-3パターンを順に試し、結果を表にする。
+3パターンを順に試し、結果を表にする(Snowflakeドライバー無しのコンテナで可)。
 
 | 試行 | Gemfile | 確認コマンド |
 |---|---|---|
-| A | `gem 'ruby-odbc'`(rubygems版 0.999992) | `bundle install && ruby -rodbc -e 'puts ODBC::VERSION'` |
+| A | `gem 'ruby-odbc'`(rubygems版 0.999993) | `bundle install && ruby -rodbc -e 'puts :loaded'` |
 | B | `gem 'ruby-odbc-supported'` (1.0.1) | 同上 |
 | C | `gem 'ruby-odbc', github: 'vhermecz/ruby-odbc'`(adapter READMEの指定) | 同上 |
+
+`ODBC::VERSION` 定数は存在しない(参照するとNameError)ため、確認コマンドは `puts :loaded` を使う。
+
+#### 実施結果(2026-10-03、Docker `ruby:4.0` = Ruby 4.0.7、unixODBC、Snowflakeドライバー無し)
+| 試行 | 結果 | 原因 |
+|---|---|---|
+| A | OK(ビルド・ロード) | - |
+| B | NG | `ext/odbc.c` で `fetch_first_hash` を arity 0 で登録しているが、関数は `(int argc, VALUE *argv, VALUE self)`。Ruby 4 の `anyargs.h` の型チェックで `-Wincompatible-pointer-types` がエラーになる |
+| C | NG | gemspec の `s.has_rdoc = false`(RubyGems 4で `has_rdoc=` が削除済み)で `bundle install` が止まる。拡張自体は無修正でビルドできる |
+
+- 修正後(Step 7 の例として実施済み。ブランチ `fix/ruby4`、ローカルのみでfork・pushは未実施): B は `fetch_first_hash` の arity を `0` → `-1` に変更(1行)、C は `has_rdoc` の行を削除(1行)。どちらもビルド・ロードのみ確認。**SELECTできるかはStep 3で確認する**(未確認)。
+- Aが通るため、後続のStep 3〜5はまずAで進める。B・Cの修正は記事の素材とupstream PR候補(Cのvhermeczは最終コミット2023-01で停止、Bのcloudvolumes/ruby-odbc-supportedは2025-11に1.0.1)。
 
 - 期待: どれが Ruby 4 でビルド・ロードできるか。ビルドエラーが出たら全文を記録(記事の素材)。
 - 想定される失敗: C拡張が使う古いRuby C API(例: `rb_data_object_*`、`rb_cData`等の削除/警告)によるコンパイルエラー。
@@ -290,9 +302,9 @@ bundle install && bundle exec rake test 2>&1 | tail -30
 | Step | 条件 | 結果(OK/NG) | エラー/メモ |
 |---|---|---|---|
 | 1 | isql | | |
-| 2-A | ruby-odbc 0.999992 | | |
-| 2-B | ruby-odbc-supported 1.0.1 | | |
-| 2-C | vhermecz/ruby-odbc | | |
+| 2-A | ruby-odbc 0.999993 | OK | ビルド・ロードのみ確認 |
+| 2-B | ruby-odbc-supported 1.0.1 | NG→修正でOK | `fetch_first_hash` のarity不整合。修正はbranch `fix/ruby4`(ローカル) |
+| 2-C | vhermecz/ruby-odbc | NG→修正でOK | gemspecの `has_rdoc=`。修正はbranch `fix/ruby4`(ローカル) |
 | 3 | 素のODBC SELECT | | |
 | 4 | AR単体 + adapter | | |
 | 5 | Rails 8.1 | | |
@@ -353,3 +365,5 @@ docker rmi ruby-odbc-sf
 13. 各リポジトリのライセンス・`CONTRIBUTING`・メンテナーの活動状況(PRを出す前に確認)。`snowflake_odbc_adapter` は MIT。`ruby-odbc` 系は未確認。
 14. 修正対象がどの層(`ruby-odbc` のC拡張 / adapter / Rails側設定)になるかは、Step 2〜5 の結果で決まる。
 15. Snowflakeの実接続が必要なテストをupstreamのCIでどう扱うか(モック化の可否)。
+16. `snow sql` がOAuth(`OAUTH_AUTHORIZATION_CODE`)接続のためブラウザ認証を要し、非対話では `Aborted` になる。Snowflake側の準備(3章)は事前に `snow connection test` で認証を済ませてから行う(2026-10-03に確認)。
+17. Snowflake ODBC の deb は手動取得が必要(自動取得は未対応)。

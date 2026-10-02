@@ -165,13 +165,7 @@ echo "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_VERSION();" | isql -v sf
 - 想定される失敗: C拡張が使う古いRuby C API(例: `rb_data_object_*`、`rb_cData`等の削除/警告)によるコンパイルエラー。
 
 ### Step 3: 素のODBC APIでSELECT(キーペア認証)
-```ruby
-require 'odbc'
-conn_str = ENV.fetch('SF_ODBC_CONN')
-db = ODBC.connect_drv(conn_str) rescue ODBC::Database.new.drvconnect(ODBC::Driver.new.tap { |d| d.name = 'Snowflake ODBC' })
-# 上は書き方が版により異なる。READMEに従い drvconnect(conn_str) で書き直すこと
-```
-実際には次の形を基本にする(gemの版でAPIを確認すること)。
+`ruby-odbc` のAPIは版により差があるため、READMEとgem内のサンプルで確認すること。基本形は次のとおり。
 ```ruby
 require 'odbc'
 db = ODBC::Database.new

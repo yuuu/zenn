@@ -25,6 +25,11 @@
 ### 目的
 「Ruby 4 + Rails 8.x から Snowflake にODBC経由で接続できるか」を段階的に検証し、どこまで動き、どこで壊れるかを明らかにする。最終ゴールは Rails 8 の `ActiveRecord` から SELECT できること。
 
+### 方針: 動かなければforkして直してよい
+- 動かない場合は、gemをforkしてコードを改変してよい(個人の判断で許可済み)。
+- 改変が小さく、出来が良ければ、upstreamへPRを出すことを検討する(出すかどうかは、出来を見て執筆者が最終判断する。自動では出さない)。
+- 改変は「最小限の差分で、原因ごとにコミットを分ける」。記事では差分を載せ、なぜ必要だったかを説明する。
+
 ### 検証の段階(後段ほどハードル高)
 1. Snowflake ODBCドライバー単体で接続(`isql`)
 2. Ruby 4 で `ruby-odbc` 系gemがビルド・ロードできる
@@ -37,7 +42,7 @@
 2. 環境構築(Docker / unixODBC / Snowflake ODBC)
 3. Ruby 4で ruby-odbc は動くか
 4. snowflake_odbc_adapter を Rails 8 で動かす(動いた/動かなかった)
-5. 動かすために必要だったパッチ or 代替案(SQL API / ruby_snowflake_client)
+5. 動かすために必要だったパッチ(forkして直した内容、upstreamへのPR) or 代替案(SQL API / ruby_snowflake_client)
 6. まとめ
 
 ## 2. 前提条件・準備物
@@ -253,6 +258,33 @@ bin/rails runner 'puts Product.where(is_active: true).pluck(:name).inspect'
 - SQL API v2(`Net::HTTP` + `jwt` gem):キーペアJWTで `/api/v2/statements` に投げる最小実装。
 - 計測: `Benchmark.realtime` で10万行程度の SELECT を各方式で3回測定し、中央値を表にする。
 
+### Step 7: forkして直す(Step 2〜5で失敗した場合)
+対象は失敗した層のリポジトリ(`ruby-odbc` 系 / `snowflake_odbc_adapter`)。まず原因の層を特定し、その層だけを直す。
+
+```bash
+# 例: adapterをfork(GitHub CLI)。fork先はユーザー自身のアカウント
+gh repo fork GuillaumeGillet/snowflake_odbc_adapter --clone --default-branch-only
+cd snowflake_odbc_adapter
+git switch -c fix/ruby4-rails8
+
+# ベースラインのテスト確認(テストがある場合)
+bundle install && bundle exec rake test 2>&1 | tail -30
+```
+1. **原因の特定**: Step 2〜5 のエラーを、`gem` 内のどのファイル・どの行で起きているか特定する(`bundle exec gem contents` / スタックトレース)。
+2. **再現手順を先に固める**: 最小の再現スクリプト(Step 3/4 のコード)を `script/` などに置き、失敗するコミットを残してから直す。
+3. **最小差分で修正**: 1つの原因につき1コミット。例:
+   - Ruby 4 で削除/変更されたC API・標準ライブラリ(C拡張のビルドエラー)
+   - Rails 8.x の内部API変更(アダプターのメソッド名・引数・`ActiveRecord::ConnectionAdapters` の変更)
+   - `database.yml` からの接続パラメータの受け渡し
+4. **検証**: 修正後に Step 3〜5 を再実行し、結果表(6章)を更新する。可能なら Ruby 3.3 / 3.4 でも通ることを確認し、後方互換を壊していないことを示す。
+5. **gemの参照切り替え**: 手元のRailsアプリは `gem 'snowflake_odbc_adapter', github: '<自分のアカウント>/snowflake_odbc_adapter', branch: 'fix/ruby4-rails8'` で検証する。
+6. **upstreamへPRを出す判断**(出来が良ければ):
+   - 事前確認: ライセンス(adapterはMIT)、`CONTRIBUTING`、既存のIssue/PR、メンテナーの最近の活動(最終コミット日)。
+   - PRの内容: 変更理由、再現手順、検証環境(Ruby/Rails/ODBCドライバーの版)、変更前後の結果。テストを追加できるなら追加する(Snowflake実接続が必要なテストはCIでは動かせないため、モックまたは手動確認として説明を書く)。
+   - 認証情報・アカウント名・秘密鍵を差分やログに含めない(PR前に `git diff` と `git log -p` を確認)。
+   - upstreamが更新を止めている場合は、PRを出したうえで、forkをそのまま公開して使えるようにするか、別名gemで公開するかを検討する(この判断は記事の内容を見て決める)。
+7. **記事への反映**: 修正差分、PRのURL(出した場合)、upstreamの反応を記録する。PRを出さなかった場合も、その理由を書く。
+
 ## 6. 結果の記録フォーマット(記事用)
 
 | Step | 条件 | 結果(OK/NG) | エラー/メモ |
@@ -265,6 +297,7 @@ bin/rails runner 'puts Product.where(is_active: true).pluck(:name).inspect'
 | 4 | AR単体 + adapter | | |
 | 5 | Rails 8.1 | | |
 | 6 | 代替方式との速度比較 | | |
+| 7 | fork修正後の再検証(Ruby 4 / 3.4、Rails 8.x) | | 修正コミット/PR URL |
 
 NGの場合は「どのバージョンの組み合わせで」「どのエラーで」止まったかを必ず残す。パッチで直せたら差分も載せる(forkしてPRを出す選択肢もある)。
 
@@ -273,6 +306,7 @@ NGの場合は「どのバージョンの組み合わせで」「どのエラー
 - Step 2 のビルドエラー(失敗した場合)全文
 - Step 3〜5 の SELECT 結果(日本語・タイムスタンプ含む)
 - Step 6 のベンチ表
+- forkで加えた修正差分(diff)と、upstreamへのPR URL(出した場合)
 - 最終的な動作可否の組み合わせ表(Ruby / Rails / gem の版)
 
 ## 8. エラー時の確認ポイント
@@ -300,6 +334,7 @@ docker rmi ruby-odbc-sf
 ## 10. コスト・セキュリティ注意
 - XSMALL・自動停止60秒のウェアハウスのみ使う。ベンチは短時間で終える。
 - 秘密鍵は検証後に削除する。コンテナイメージに鍵を焼き込まない(`-v` でマウント)。
+- forkやPRの差分・ログ・スクリーンショットに、アカウント識別子、ユーザー名、秘密鍵、接続文字列を含めない。
 - `TYPE=SERVICE` のユーザーにはパスワードを設定しない。
 
 ## 11. 未確認事項リスト(実行前・執筆前に確認する)
@@ -315,3 +350,6 @@ docker rmi ruby-odbc-sf
 10. Rails 8.1 の multi-database 機構(`connects_to`)とadapterの相性、`max_connections`(旧 `pool`)の指定名。
 11. ODBC各方式の速度比較(READMEの数値は他者の環境のもの)。
 12. 日本語情報の有無は検索範囲内の結論で、存在しないとは断定できない。
+13. 各リポジトリのライセンス・`CONTRIBUTING`・メンテナーの活動状況(PRを出す前に確認)。`snowflake_odbc_adapter` は MIT。`ruby-odbc` 系は未確認。
+14. 修正対象がどの層(`ruby-odbc` のC拡張 / adapter / Rails側設定)になるかは、Step 2〜5 の結果で決まる。
+15. Snowflakeの実接続が必要なテストをupstreamのCIでどう扱うか(モック化の可否)。

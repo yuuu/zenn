@@ -1,6 +1,6 @@
 # 検証手順書: Ruby 4 + Rails 8 から Snowflake に ODBC で接続できるか試す
 
-作成日: 2026-10-03 / 実行状況: Step 2(+Step 7のB・C修正)のみ実施済み。Snowflake接続が要るStep 1・3〜6は未実施(2026-10-03時点)
+作成日: 2026-10-03 / 実行状況: Step 1・2・3・4・5・7、Step 6の一部(ODBC単体ベンチのみ)を実施済み(2026-10-03時点)。検証環境は `~/ghq/yuuu/ruby4-rails8-snowflake-odbc/`。代替方式(ruby_snowflake_client・SQL API)との比較、クリーンアップ、upstreamへのPR可否判断は未実施。
 
 ## 0. 事前調査で分かっていること(2026-10-03時点)
 
@@ -46,17 +46,18 @@
 6. まとめ
 
 ## 2. 前提条件・準備物
-- Docker が使えるホスト(Linux)。ホストOSを汚さないよう、検証は全てコンテナ内で行う。
+- Docker が使えるホスト(Linux)。ホストOSを汚さないよう、検証は全てコンテナ内で行う。Arm Mac(Docker Desktop/Rancher Desktop)の場合、Snowflake ODBCドライバーがx86_64のみの配布のため `--platform=linux/amd64` のエミュレーションが必要(buildx経由、`linux/amd64`対応を確認済み)。
 - Snowflakeアカウント(ACCOUNTADMIN前提で簡略化。既存記事と同様)。
-- Snowflake CLI(`snow`)が接続済み。接続名は `default` と仮定。
+- Snowflake CLI(`snow`)が接続済み。接続名は実際の環境に合わせる(本検証では `oauth`。OAuth接続は非対話実行の前に`snow connection test`で対話認証を済ませておく)。
 - OpenSSL(キーペア生成用)。
 - AWSは使わない。
+- 実際の検証ディレクトリ: `~/ghq/yuuu/ruby4-rails8-snowflake-odbc/`(gitリポジトリ化。秘密鍵・`.deb`・`sf_app/`は`.gitignore`対象)。fork した adapter は同ディレクトリ配下の `snowflake_odbc_adapter/`(リモート: https://github.com/yuuu/snowflake_odbc_adapter )。
 
 ## 3. Snowflake側の準備(CLI)
 
 ```bash
-# 作業ディレクトリ
-mkdir -p ~/work/ruby-odbc-sf && cd ~/work/ruby-odbc-sf
+# 作業ディレクトリ(本検証では ~/ghq/yuuu/ruby4-rails8-snowflake-odbc を使用)
+mkdir -p ~/ghq/yuuu/ruby4-rails8-snowflake-odbc && cd ~/ghq/yuuu/ruby4-rails8-snowflake-odbc
 
 # 検証用ロール/ユーザー/ウェアハウス/DB/テーブル
 snow sql -q "
@@ -301,17 +302,32 @@ bundle install && bundle exec rake test 2>&1 | tail -30
 
 | Step | 条件 | 結果(OK/NG) | エラー/メモ |
 |---|---|---|---|
-| 1 | isql | | |
+| 1 | isql(Snowflake ODBC 4.0.0、Docker `ruby:4.0`=Ruby 4.0.7、unixODBC) | OK | `SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_VERSION()` で接続・クエリとも成功 |
 | 2-A | ruby-odbc 0.999993 | OK | ビルド・ロードのみ確認 |
 | 2-B | ruby-odbc-supported 1.0.1 | NG→修正でOK | `fetch_first_hash` のarity不整合。修正はbranch `fix/ruby4`(ローカル) |
 | 2-C | vhermecz/ruby-odbc | NG→修正でOK | gemspecの `has_rdoc=`。修正はbranch `fix/ruby4`(ローカル) |
-| 3 | 素のODBC SELECT | | |
-| 4 | AR単体 + adapter | | |
-| 5 | Rails 8.1 | | |
-| 6 | 代替方式との速度比較 | | |
-| 7 | fork修正後の再検証(Ruby 4 / 3.4、Rails 8.x) | | 修正コミット/PR URL |
+| 3 | 素のODBC SELECT(ruby-odbc 0.999993、キーペア認証) | OK | 3行取得。NUMBERはString(`"4980.50"`)、BOOLEANはInteger(0/1)、TIMESTAMPは`ODBC::TimeStamp`。日本語は**バイト列は正しいUTF-8だが`ASCII-8BIT`タグ付けされて返る**(文字化けではなく encoding 未設定。`force_encoding('UTF-8')`で解決) |
+| 4 | AR単体 + adapter(activerecord 8.1.4 + snowflake_odbc_adapter 7.2.0.1) | NG→2パッチでOK | 詳細は下記「Step 4/5 で踏んだ2つのバグ」参照。パッチ後は`count`/`order`/`where`/`pluck`/`first`すべて成功。`to_sql`はbind値が`?`のまま表示される(実行結果自体は正しい) |
+| 5 | Rails 8.1(`rails new`実アプリ、`connects_to`によるマルチDB、sqlite3がprimary) | OK | `bin/rails runner`から`Product.count`/`order`/`where`/`pluck`すべて成功。Step 4と同じ2パッチが必要 |
+| 6 | 代替方式との速度比較 | 一部のみ実施 | ruby-odbcで10万行SELECT(ORDER BY付き)を3回計測: 6.779s / 6.863s / 6.565s(XSMALL、Docker amd64はArm Mac上でQEMUエミュレーション実行のため参考値)。`ruby_snowflake_client`・SQL API v2との比較は未実施(時間の都合で見送り) |
+| 7 | fork修正後の再検証(Ruby 4.0.7、Rails 8.1.4) | OK | 2コミットで修正。upstreamへのPRはまだ出していない(要判断) |
 
 NGの場合は「どのバージョンの組み合わせで」「どのエラーで」止まったかを必ず残す。パッチで直せたら差分も載せる(forkしてPRを出す選択肢もある)。
+
+### Step 4/5 で踏んだ2つのバグ(snowflake_odbc_adapter 7.2.0.1 / activerecord 8.1.4)
+
+いずれも fork(https://github.com/yuuu/snowflake_odbc_adapter, branch `fix/ruby4-rails8`)で最小差分で修正し、Step 4・5の再検証でOKになることを確認済み。
+
+1. **`SnowflakeOdbc::Column#_default` が `nil` を処理できない**(`lib/active_record/connection_adapters/snowflake_odbc/column.rb:15`)
+   - 症状: DEFAULT句のないカラムを含むテーブルに対して、カラムメタデータを読む最初のクエリ(`order`など)で `undefined method 'empty?' for nil (NoMethodError)` が発生。
+   - 原因: `default.empty?` を `nil` チェックなしで呼んでいた。
+   - 修正: `return nil if default.nil? || default.empty?` に1行変更。
+2. **Rails 8.1 で `ActiveRecord::ConnectionAdapters::Column#initialize` に `cast_type` 引数が追加され、位置引数がずれる**(同ファイル5〜10行目)
+   - 症状: 上記1を直した直後に `undefined method 'deduplicate' for true (NoMethodError)` が発生。
+   - 原因: Rails 8.1で `Column#initialize(name, cast_type, default, sql_type_metadata = nil, null = true, ...)` と `name` の次に `cast_type` が挿入された(7.x/8.0は `cast_type` なし)。adapter側は旧シグネチャのまま `super(name, default, sql_type_metadata, null, ...)` を呼んでいたため、`null`(true/false)が`sql_type_metadata`の位置にずれて渡っていた。
+   - 修正: `ConnectionAdapters::Column.instance_method(:initialize).parameters` で `cast_type` 引数の有無を実行時検出し、ある場合だけ `nil`(`fetch_cast_type`で遅延解決される)を2番目の位置引数として挿入。gemspecが `activerecord >= 7.2` を要求しており上限がないため、バージョン分岐がある方が安全と判断。
+
+この他に、fork元リポジトリ自体に **ビルド済み `.gem` ファイルがコミットされている**既存の問題があり、`Gemfile`で`github:`指定するとRubyGemsの"contains itself"エラーで`bundle install`が失敗した(`snowflake_odbc_adapter-7.2.0.1.gem`・`snowflake_odbc_adapter-7.2.0.gem`を削除するコミットを別途追加して回避)。
 
 ## 7. 記事に載せる出力・スクリーンショット
 - `ruby -v` / `bundle list | grep -E 'rails|activerecord|odbc'`
@@ -350,20 +366,25 @@ docker rmi ruby-odbc-sf
 - `TYPE=SERVICE` のユーザーにはパスワードを設定しない。
 
 ## 11. 未確認事項リスト(実行前・執筆前に確認する)
-1. Ruby 4.0 の正式リリース状況と Docker タグ `ruby:4.0` の有無(本書は存在する前提)。
-2. Rails 8.1 の Ruby 4 対応(Rails 8.1.2 の `required_ruby_version` が `< 4.1.0` という検索要約のみで確認)。
-3. `snowflake_odbc_adapter` のアダプター名(`database.yml` の `adapter:` の値)、`require` 名、接続パラメータ名(`conn_str` か `connection_string` か)。READMEに例が無いため、ソース(`lib/`)を読んで確認する。
-4. `snowflake_odbc_adapter` が要求する `ruby-odbc` の指定(`vhermecz/ruby-odbc` 以外で良いか)。
-5. `ruby-odbc-supported` の Ruby 4 でのビルド可否と、元の ruby-odbc との差分。
-6. Snowflake ODBC 4.x の最新バージョンと、deb 取得URL、debインストール時の `SF_ACCOUNT` 要否。
-7. キーペア認証のパラメータ名(`PRIV_KEY_FILE` 等)がアダプター経由の接続文字列でも有効か。
-8. `CREATE USER ... TYPE=SERVICE` が検証アカウントで使えるか。
-9. VARIANT/BOOLEAN/TIMESTAMP の型変換(adapter側の対応状況)。
-10. Rails 8.1 の multi-database 機構(`connects_to`)とadapterの相性、`max_connections`(旧 `pool`)の指定名。
-11. ODBC各方式の速度比較(READMEの数値は他者の環境のもの)。
-12. 日本語情報の有無は検索範囲内の結論で、存在しないとは断定できない。
-13. 各リポジトリのライセンス・`CONTRIBUTING`・メンテナーの活動状況(PRを出す前に確認)。`snowflake_odbc_adapter` は MIT。`ruby-odbc` 系は未確認。
-14. 修正対象がどの層(`ruby-odbc` のC拡張 / adapter / Rails側設定)になるかは、Step 2〜5 の結果で決まる。
-15. Snowflakeの実接続が必要なテストをupstreamのCIでどう扱うか(モック化の可否)。
-16. `snow sql` がOAuth(`OAUTH_AUTHORIZATION_CODE`)接続のためブラウザ認証を要し、非対話では `Aborted` になる。Snowflake側の準備(3章)は事前に `snow connection test` で認証を済ませてから行う(2026-10-03に確認)。
-17. Snowflake ODBC の deb は手動取得が必要(自動取得は未対応)。
+1. **解決**: Docker タグ `ruby:4.0` は存在する(Ruby 4.0.7、2026-09-15リリース)。
+2. **解決**: Rails 8.1.4 は Ruby 4.0.7 上で動作した(`gem install rails -v '~> 8.1'`が解決・起動した)。
+3. **解決**: adapter名は `"odbc"`(`"snowflake_odbc"`ではない)。`require "snowflake_odbc_adapter"`で自動的に`active_record/connection_adapters/snowflake_odbc_adapter`がrequireされる。接続パラメータは`:conn_str`必須(`:dsn`は`NotImplementedError`)で、値は`"Key=Value;Key=Value"`形式の文字列。
+4. **解決**: `ruby-odbc`(rubygems版 0.999993、素の指定でOK)で動く。`vhermecz/ruby-odbc`や`ruby-odbc-supported`への切り替えは不要だった。
+5. **解決(参考)**: `ruby-odbc-supported` 1.0.1はStep 2の調査時点でRuby 4ビルドにNGだったが、Step 4/5の本検証は`ruby-odbc`で通ったため未使用。
+6. **解決**: Snowflake ODBC Linuxドライバーは2026-10-03時点で最新 4.0.0(他に4.0.0-rc1〜rc4のプレリリースあり)。取得URLは `https://sfc-repo.snowflakecomputing.com/odbc/linux/<version>/snowflake-odbc-<version>.x86_64.deb`(ログイン不要でcurl取得可)。**x86_64ビルドのみ配布されており、aarch64向けdeb/rpm/tar.gzは存在しない**(Arm Mac/Linuxでは`--platform=linux/amd64`のエミュレーションが必須)。dpkg実行時に`SF_ACCOUNT`未設定の警告が出るが、`odbc.ini`を後から上書きするなら無視してよい。
+7. **解決**: `PRIV_KEY_FILE`/`AUTHENTICATOR=SNOWFLAKE_JWT`等のODBCキーペア認証パラメータは、adapter経由の接続文字列(`conn_str`)でもそのまま有効。
+8. **解決**: `ALTER USER ... SET TYPE=SERVICE` はこの検証アカウント(ACCOUNTADMIN)で問題なく実行できた。
+9. **解決**: 素のODBC層ではNUMBERはString、BOOLEANはInteger(0/1)、TIMESTAMPは`ODBC::TimeStamp`で返る。adapter層(ActiveRecord)はtype mapで適切にInteger/Float/Time/boolean(true/false)へ変換する。ただしNUMBERは**Floatにマップされ、BigDecimalにはならない**(金額等の精度が必要な用途では要注意)。文字列(日本語含む)はバイト列は正しいがASCII-8BITタグのまま返り、adapter層でも再エンコードされない。
+10. **解決**: `connects_to database: { writing: :snowflake, reading: :snowflake }` で問題なく動作。sqlite3側(`primary`)は`max_connections`(Rails 8.1のデフォルトテンプレート)、snowflake側は接続プールの設定自体を省略しても動いた(adapterが独自に`@raw_connection`を1本持つだけで、AR標準のプーリングの恩恵は薄い可能性がある。本番運用するなら要追加調査)。
+11. 一部解決: ruby-odbcでの10万行SELECTは6.5〜6.9秒(XSMALL、QEMUエミュレーション環境のため参考値)。`ruby_snowflake_client`・SQL API v2との比較は未実施。
+12. 未解決(範囲内の結論のまま)。
+13. **解決**: `snowflake_odbc_adapter`(fork元 https://github.com/singlespot/snowflake_odbc_adapter )はMIT、Issueは0件・オープンPRなし、直近コミットは2024-09-19(gemの最終リリース7.2.0.1と同時期)。ただし2026-08-05に関連PR(column comments対応等)がマージされた形跡があるのに、そのコミットが`main`ブランチの履歴に見当たらない不整合がある(要再確認)。`ruby-odbc`(larskanis)側は未確認。
+14. **解決**: 修正対象は`snowflake_odbc_adapter`のactiverecordアダプター層(`lib/active_record/connection_adapters/snowflake_odbc/column.rb`)の2箇所。`ruby-odbc`本体・Rails側のdatabase.ymlには修正不要だった。
+15. 未解決(upstreamへのPRを出すかどうかの判断と合わせて未着手)。
+16. **解決(確認済み)**: `snow sql`はOAuthの対話セッションが切れると非対話実行時に`Unable to receive the OAuth message within a given timeout`で失敗する。`snow connection test`を一度対話的に実行してから流す。
+17. **解決**: Snowflake ODBCのdebはログイン不要で`curl`取得可能(手動ダウンロードの手間はないが、自動化スクリプトに組み込む場合はURLのバージョン部分を都度更新する必要がある)。
+
+### 新たに判明した未確認事項
+18. upstream (`singlespot/snowflake_odbc_adapter`) の `main` ブランチにビルド済み `.gem` ファイル(`snowflake_odbc_adapter-7.2.0.1.gem` 等)がコミットされており、`github:` ソースでの`bundle install`を壊す。upstreamへのPRにはこのクリーンアップも含めるべきか要判断。
+19. Ruby 4.0 で `benchmark` が標準添付ライブラリから削除された(`require 'benchmark'`が`LoadError`になる。`bundled_gems.rb`経由で「Gemfileに追加してください」という警告が出る)。計測には`Process.clock_gettime(Process::CLOCK_MONOTONIC)`を使った。
+20. `Product.where(...).to_sql` の出力がバインド値を展開せず `?` のままになる(実際のクエリ実行・結果は正しい)。adapterが`quote`/`cast_bound_value`周りを完全には実装していない可能性があり、ログ出力等で生SQLを確認したい場合は注意。

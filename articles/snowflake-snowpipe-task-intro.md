@@ -10,12 +10,19 @@ topics:
 published: false
 ---
 
-Snowflakeでデータ基盤を作るとき、「S3にファイルが置かれたら自動で取り込み、その後に加工までやりたい」という場面はよくあります。
-このとき定番になるのが **Snowpipe + Stream + Task** の組み合わせです。
+以前、Snowflake Dynamic tablesを使って、データをELTする記事を書きました。
 
-本記事では、この構成がどういうもので、それぞれが何を担当しているのかを簡単に整理します。
+https://zenn.dev/fusic/articles/snowflake-dynamic-tables-for-iot
+
+ELTとは「Extract->Load->Transform」、つまり先に保存してから必要に応じて変換することです。
+しかし、データの用途が明確である場合は、余分なデータを極力保存したくない場合、ETL(Extract->Transform->Load)という順で変換後のデータを保存することもよくあります。
+
+Snowflakeでこれを実現するための1つの方法として「Snowpipe + Stream + Task」を使った方法があります。
+本記事ではこの構成の解説と、実際に構築する方法について解説します。
 
 ## 全体像
+
+構成を図で表すと次の通りです。
 
 ```mermaid
 flowchart LR
@@ -27,20 +34,18 @@ flowchart LR
   TASK --> OUT[(加工後テーブル)]
 ```
 
-役割を一言でまとめると次のとおりです。
+この構成の中核を担う「Snowpipe + Stream + Task」についてそれぞれの役割は次の通りです。
 
-| 部品 | 役割 |
+| 要素 | 役割 |
 | --- | --- |
 | Snowpipe | ステージに置かれたファイルを、テーブルへ自動で取り込む |
 | Stream | テーブルに追加・変更された行(差分)を記録する |
 | Task | SQLをスケジュールに従って実行する |
 
-「Snowpipeで入れる」→「Streamで新しい行だけを見つける」→「Taskで加工する」という流れです。
-
 ## Snowpipe: ファイルを自動で取り込む
 
-Snowpipeは、ステージ(S3などのファイル置き場)に新しいファイルが届いたら、自動で `COPY INTO` を実行してくれる機能です。
-実体は「`COPY INTO` 文を中に持った `PIPE` オブジェクト」です。
+Snowpipeは、ステージ(S3などのファイル置き場)に新しいファイルが格納されたら、自動で `COPY INTO` を実行する機能です。
+SQLで表すと「`COPY INTO` 文を中に持った `PIPE` オブジェクト」を作成しています。
 
 ```sql
 CREATE OR REPLACE PIPE MY_PIPE
@@ -54,17 +59,17 @@ FILE_FORMAT = (TYPE = CSV);
 `AUTO_INGEST = TRUE` にすると、S3のイベント通知をトリガーに動きます。
 S3バケット側で、PIPEに紐づくSnowflake管理のSQS(`SHOW PIPES` の `notification_channel` 列で確認できます)へイベント通知を送る設定をしておきます。
 
-ポイントは次のとおりです。
+Snowpipeを使う際に知っておくべきことをまとめます。
 
 - 実行にはユーザーのウェアハウスではなく、Snowflakeが管理するサーバーレスのリソースが使われます(課金もサーバーレス)
 - 取り込み済みのファイルは記録されるため、同じファイルが二重に取り込まれることは基本的にありません
 - 数十秒〜数分程度の遅延が出るので、秒単位のリアルタイム性が必要な場合は[Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)の方が向いています
 - 小さなファイルを大量に置くとファイルごとのオーバーヘッドが効いて割高になるので、ある程度まとめて置くのがおすすめです
 
-## Stream: 「新しく入った行」を覚えておく
+## Stream: 「新しく入った行」を覚える
 
 Snowpipeでテーブルにデータが入っても、そのままでは「どこまで加工済みか」が分かりません。
-そこで登場するのが Stream です。
+Streamを使うことでこの課題を解決します。
 
 ```sql
 CREATE OR REPLACE STREAM RAW_TABLE_STREAM
@@ -72,8 +77,9 @@ CREATE OR REPLACE STREAM RAW_TABLE_STREAM
   APPEND_ONLY = TRUE;
 ```
 
-StreamはテーブルのCDC(変更データキャプチャ)のようなもので、前回読んだ時点以降に変わった行だけを返します。
-`APPEND_ONLY = TRUE` にすると INSERT のみを追跡します。Snowpipeによる取り込みは追加のみなので、これで十分です。
+StreamはテーブルのCDC(変更データキャプチャ)のような機能で、前回読み込んだ時以降に変わった行だけを返します。
+`APPEND_ONLY = TRUE` にすると INSERT のみを追跡します。
+Snowpipeによる取り込みは追加のみなので、これで十分です。
 
 ```sql
 SELECT * FROM RAW_TABLE_STREAM;
@@ -99,27 +105,31 @@ AS
 ALTER TASK TRANSFORM_TASK RESUME;
 ```
 
-見てほしいのは `WHEN SYSTEM$STREAM_HAS_DATA(...)` の部分です。
+ポイントは `WHEN SYSTEM$STREAM_HAS_DATA(...)` の部分です。
+
 これは「Streamに未処理の行があるときだけ実行する」という条件で、データがない間はTaskの本体が実行されず、ウェアハウスも起動しません。
-無駄なコンピュートコストを抑えられるので、Stream + Task の組み合わせでは定番の書き方です。
+余分なコンピュートコストを抑えられるので、Stream + Task を組み合わせる際にこの記述をするとよいです。
 
-また、Taskは作成した直後は停止状態(suspended)なので、`ALTER TASK ... RESUME` で有効化する必要があります。ここは忘れやすいポイントです。
+また、Taskは作成した直後は停止状態(suspended)であり、`ALTER TASK ... RESUME` で有効化する必要があります。
+忘れやすいので注意しましょう。
 
-## なぜ「取り込み」と「加工」を分けるのか
+## 「取り込み」と「加工」を分けるメリット
 
-Snowpipeの `COPY INTO` の中で変換することもできますが、あえて RAW テーブルに一度そのまま入れてから Task で加工する構成にすると、次のようなメリットがあります。
+実際にはこのような設計とせずとも、Snowpipeの `COPY INTO` の中で変換まで終えることも可能です。
+しかし、RAWテーブルに一度そのまま入れてからTaskで加工する構成にすることで、次のようなメリットがあります。
 
 - 加工処理が失敗しても、取り込み済みのRAWデータは残っているのでやり直せる
 - 加工ロジックを変更したくなったとき、元データから作り直せる
 - 取り込み(サーバーレス課金)と加工(ウェアハウス課金)を分離できる。特にLLM呼び出しなど重い処理を入れる場合に、取り込みのたびに走らせずに済む
 
-なお、加工の目的が単に「集計・変換結果を最新に保つこと」であれば、Stream + Taskを自前で組む代わりに[動的テーブル(Dynamic Tables)](https://zenn.dev/fusic/articles/snowflake-dynamic-tables-for-iot)で宣言的に書く選択肢もあります。
 Taskは外部関数の呼び出しや条件分岐を含む手続き的な処理、Dynamic Tablesはクエリ定義だけで済む変換、というように使い分けるとよいでしょう。
 
 ## 実際に試してみる
 
-ここまでの流れを、S3にCSVを置いて加工結果が出るところまで、最小構成で試してみます。
-AWS CLIとSnowflakeのSQLだけで完結させます。SQLは Snowsight のワークシートで実行しても、[Snowflake CLI](https://docs.snowflake.com/ja/developer-guide/snowflake-cli/index) の `snow sql` で実行しても構いません。
+ここまでの流れを、S3にCSVを置いて加工結果が出るところまで、最小構成で試す手順をまとめます。
+
+AWS CLIとSnowflakeのSQLだけで完結させます。
+SQLは Snowsight のワークシートで実行しても、[Snowflake CLI](https://docs.snowflake.com/ja/developer-guide/snowflake-cli/index) の `snow sql` で実行しても構いません。
 
 ### 前提
 
@@ -397,16 +407,13 @@ aws iam delete-role --role-name snowpipe-task-demo
 
 ## おわりに
 
-Snowpipe + Stream + Task は、「ファイルが置かれたら自動で取り込み、新しいデータだけを定期的に加工する」ためのシンプルで定番の構成です。
+Snowpipe + Stream + Task を組み合わせることで「ファイルが置かれたら自動で取り込み、新しいデータだけを定期的に加工する」といったETLの仕組みを構築できることが確認できました。
 
-- Snowpipe: ファイルを自動で取り込む
-- Stream: 新しく入った行だけを教えてくれる
-- Task: 新しい行があるときだけSQLを実行する
-
-この3つを覚えておけば、S3を起点とした取り込み〜加工のパイプラインがSnowflakeの中だけで完結します。
+Snowflakeにさまざまなデータを集約する際、データの特性に応じてELTとETLを使い分けたいところです。
 
 ## 参考文献
 
-- [Snowpipe の紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/data-load-snowpipe-intro)
-- [ストリームの紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/streams-intro)
+- [Amazon S3用Snowpipeの自動化 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/data-load-snowpipe-auto-s3)
+- [Snowpipe | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/data-load-snowpipe-intro)
+- [Introduction to streams | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/streams-intro)
 - [タスクの紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/tasks-intro)

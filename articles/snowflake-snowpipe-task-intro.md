@@ -22,7 +22,8 @@ Snowflakeでこれを実現するための1つの方法として「Snowpipe + St
 
 ## 全体像
 
-構成を図で表すと次の通りです。オレンジ色がAWS、青色がSnowflakeのリソースです。
+構成を図で表すと次の通りです。
+オレンジ色がAWS、青色がSnowflakeのリソースです。
 
 ```mermaid
 flowchart BT

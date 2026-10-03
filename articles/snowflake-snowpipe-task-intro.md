@@ -22,16 +22,36 @@ Snowflakeでこれを実現するための1つの方法として「Snowpipe + St
 
 ## 全体像
 
-構成を図で表すと次の通りです。
+構成を図で表すと次の通りです。オレンジ色がAWS、青色がSnowflakeのリソースです。
 
 ```mermaid
-flowchart LR
-  S3[(S3<br/>ファイル)] -->|イベント通知| SQS[Snowflake管理のSQS]
-  SQS --> PIPE[Snowpipe]
-  PIPE -->|COPY INTO| RAW[(RAWテーブル)]
-  RAW --> STM[Stream<br/>差分の記録]
-  STM --> TASK[Task<br/>定期実行]
-  TASK --> OUT[(加工後テーブル)]
+flowchart BT
+  subgraph SF2["❄️ Snowflake ②加工"]
+    direction LR
+    STM["Stream<br/>差分の記録"] --> TASK["Task<br/>定期実行"] --> OUT[("加工後テーブル")]
+  end
+  subgraph TOP[" "]
+    direction RL
+    subgraph SF1["❄️ Snowflake ①取り込み"]
+      direction LR
+      PIPE["Snowpipe"] -->|COPY INTO| RAW[("RAWテーブル")]
+    end
+    subgraph AWS["☁️ AWS"]
+      direction LR
+      S3[("S3<br/>ファイル")] -->|イベント通知| SQS["SQS<br/>(Snowflake管理)"]
+    end
+    SF1 ---|通知を受信| AWS
+  end
+  SF2 ---|RAWの差分を参照| TOP
+
+  classDef aws fill:#FFE9C7,stroke:#FF9900,stroke-width:2px,color:#232F3E
+  classDef sf fill:#D4F1FB,stroke:#29B5E8,stroke-width:2px,color:#0B3C5D
+  class S3,SQS aws
+  class PIPE,RAW,STM,TASK,OUT sf
+  style AWS fill:#FFF8EC,stroke:#FF9900,stroke-width:2px,stroke-dasharray:6 3
+  style SF1 fill:#F0FAFE,stroke:#29B5E8,stroke-width:2px,stroke-dasharray:6 3
+  style SF2 fill:#F0FAFE,stroke:#29B5E8,stroke-width:2px,stroke-dasharray:6 3
+  style TOP fill:none,stroke:none
 ```
 
 この構成の中核を担う「Snowpipe + Stream + Task」についてそれぞれの役割は次の通りです。

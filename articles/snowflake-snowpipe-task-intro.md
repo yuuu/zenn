@@ -1,16 +1,18 @@
 ---
 title: "Snowpipe + Stream + Task とは？Snowflakeで「取り込み」と「加工」を自動化する基本パターン"
-emoji: "🚰"
+emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
   - snowflake
   - snowpipe
   - aws
   - s3
-published: false
+published: true
+published_at: "2026-10-05 07:30"
+publication_name: fusic
 ---
 
-以前、Snowflake Dynamic tablesを使って、データをELTする記事を書きました。
+以前、Snowflake Dynamic Tablesを使って、データをELTする記事を書きました。
 
 https://zenn.dev/fusic/articles/snowflake-dynamic-tables-for-iot
 
@@ -66,7 +68,7 @@ flowchart BT
 ## Snowpipe: ファイルを自動で取り込む
 
 Snowpipeは、ステージ(S3などのファイル置き場)に新しいファイルが格納されたら、自動で `COPY INTO` を実行する機能です。
-SQLで表すと「`COPY INTO` 文を中に持った `PIPE` オブジェクト」を作成しています。
+SQLでは「`COPY INTO` 文を中に持った `PIPE` オブジェクト」を作成することになります。
 
 ```sql
 CREATE OR REPLACE PIPE MY_PIPE
@@ -83,7 +85,7 @@ S3バケット側で、PIPEに紐づくSnowflake管理のSQS(`SHOW PIPES` の `n
 Snowpipeを使う際に知っておくべきことをまとめます。
 
 - 実行にはユーザーのウェアハウスではなく、Snowflakeが管理するサーバーレスのリソースが使われます(課金もサーバーレス)
-- 取り込み済みのファイルは記録されるため、同じファイルが二重に取り込まれることは基本的にありません
+- 取り込み済みのファイルは記録されるため、同じファイルが二重に取り込まれることは基本的にありません(ロード履歴の保持期間は14日です)
 - 数十秒〜数分程度の遅延が出るので、秒単位のリアルタイム性が必要な場合は[Snowpipe Streaming](https://docs.snowflake.com/ja/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)の方が向いています
 - 小さなファイルを大量に置くとファイルごとのオーバーヘッドが効いて割高になるので、ある程度まとめて置くのがおすすめです
 
@@ -153,7 +155,7 @@ SQLは Snowsight のワークシートで実行しても、[Snowflake CLI](https
 ### 前提
 
 - AWS CLI が使えること
-- Snowflakeアカウントが AWS 上のリージョンにあること(Snowpipe の auto-ingest が前提とするため)
+- Snowflakeアカウントが AWS 上のリージョンにあること(auto-ingest で使うSnowflake管理のSQSが、AWS上のアカウントを前提としているため)
 - 簡単のため、Snowflake側は `ACCOUNTADMIN` ロールで操作します(検証用です)
 
 ### 1. S3バケットとIAMロールを作る
@@ -334,14 +336,14 @@ CSV
 aws s3 cp events1.csv s3://$BUCKET/data/events1.csv
 ```
 
-しばらく待ってから(数十秒〜1分程度かかります)、RAWテーブルを確認します。
+しばらく待ってから(数十秒〜数分程度かかります)、RAWテーブルを確認します。
 
 ```sql
 SELECT * FROM RAW_EVENTS;
 ```
 
 2行入っていれば、S3 → Snowpipe の部分は成功です。
-入らないときは、次のSQLでPIPEの状態を確認します。
+まだ0行のときは、少し待ってから再実行してください。それでも入らないときは、次のSQLでPIPEの状態を確認します。
 
 ```sql
 SELECT SYSTEM$PIPE_STATUS('DEMO_PIPE');
@@ -359,7 +361,7 @@ CREATE OR REPLACE STREAM RAW_EVENTS_STREAM
 CREATE OR REPLACE TASK TRANSFORM_EVENTS_TASK
   WAREHOUSE = DEMO_WH
   SCHEDULE = '1 MINUTE'
-  WHEN SYSTEM$STREAM_HAS_DATA('DEMO_DB.PUBLIC.RAW_EVENTS_STREAM')
+  WHEN SYSTEM$STREAM_HAS_DATA('RAW_EVENTS_STREAM')
 AS
   INSERT INTO CLEAN_EVENTS (ID, NAME, CREATED_AT)
   SELECT ID, UPPER(NAME), CREATED_AT
@@ -381,7 +383,7 @@ CSV
 aws s3 cp events2.csv s3://$BUCKET/data/events2.csv
 ```
 
-1〜2分ほど待ってから確認します。
+1〜2分ほど待ってから確認します。Taskの実行を待っている間は、`CLEAN_EVENTS` が0行、`RAW_EVENTS_STREAM` が2行のままのことがあります。その場合も少し待って再実行してください。
 
 ```sql
 SELECT * FROM RAW_EVENTS;        -- 4行(alice, bob, carol, dave)

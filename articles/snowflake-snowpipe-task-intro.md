@@ -132,3 +132,9 @@ Snowpipe + Stream + Task は、「ファイルが置かれたら自動で取り�
 - Task: 新しい行があるときだけSQLを実行する
 
 この3つを覚えておけば、S3を起点とした取り込み〜加工のパイプラインがSnowflakeの中だけで完結します。
+
+## 参考文献
+
+- [Snowpipe の紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/data-load-snowpipe-intro)
+- [ストリームの紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/streams-intro)
+- [タスクの紹介 | Snowflake Documentation](https://docs.snowflake.com/ja/user-guide/tasks-intro)

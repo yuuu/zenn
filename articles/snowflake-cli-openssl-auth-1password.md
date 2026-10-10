@@ -1,20 +1,24 @@
 ---
 title: "Snowflake CLIのキーペア認証を1Password CLIと連携して、秘密鍵をPCに残さず使い分ける"
-emoji: "🔑"
+emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:
   - snowflake
   - 1password
   - snowflakecli
   - security
-published: false
+published: true
+published_at: "2026-10-12 07:30"
 publication_name: fusic
 ---
 
 ## はじめに
 
 Snowflake CLI（`snow` コマンド）からSnowflakeに接続する際、パスワード認証は手軽ですが、MFAの有効化や、パスワードそのものの管理が悩みの種になります。
+
 そこで有力な選択肢となるのが**キーペア認証**です。公開鍵をSnowflakeのユーザーに登録し、秘密鍵で署名することで認証します。パスワードもMFAのプロンプトも不要になり、自動化にも向いています。
+
+https://docs.snowflake.com/ja/user-guide/key-pair-auth
 
 一方で、秘密鍵を `~/.snowflake/rsa_key.p8` のようにPCへ置きっぱなしにするのは、できれば避けたいところです。
 
@@ -27,6 +31,7 @@ Snowflake CLI（`snow` コマンド）からSnowflakeに接続する際、パス
 
 :::message
 動作確認は Snowflake CLI 3.27.0 で行っています。設定項目やコマンドは、バージョンによって異なる場合があります。
+また、本記事で解説する「秘密鍵をPCに残さない方法」においては、[direnv](https://direnv.net/) が必要です。
 :::
 
 ## キーペアの生成
@@ -146,12 +151,14 @@ shred -u rsa_key.p8   # macOSの場合は rm -P rsa_key.p8
 
 `op read` はデフォルトで、復号済みのPKCS#8 PEM形式（`-----BEGIN PRIVATE KEY-----`）の秘密鍵を返します。
 
-### 2. 環境変数ファイルに参照を書く
+### 2. 環境変数に参照をエクスポートする
 
-`op://` 形式の「シークレット参照」を環境変数ファイルに書きます。ここには秘密情報そのものは含まれないため、Gitにコミットしても問題ありません。
+`op://` 形式の「シークレット参照」を環境変数としてexportしておきます。シークレット参照自体には秘密情報が含まれないため、Gitにコミットしても問題ありません。
 
-```bash:snowflake.env
-SNOWFLAKE_CONNECTIONS_MYPROJECT_PRIVATE_KEY_RAW=op://Development/snowflake-myproject/private key
+[direnv](https://direnv.net/) と組み合わせると、ディレクトリに入るだけでこの環境変数が読み込まれて便利です。
+
+```bash:.envrc
+export SNOWFLAKE_CONNECTIONS_MYPROJECT_PRIVATE_KEY_RAW=op://Development/snowflake-myproject/private key
 ```
 
 `config.toml` の側は、`private_key_file` を削除します。
@@ -165,20 +172,21 @@ authenticator = "SNOWFLAKE_JWT"
 
 ### 3. `op run` 経由でsnowを実行する
 
-`op run` は、環境変数ファイル内の `op://` 参照を実際の値に置き換えて、子プロセスを起動します。
+`op run` は、現在の環境変数の中から `op://` 参照を見つけて実際の値に置き換え、子プロセスを起動します。
+`--env-file` でファイルを指定しなくても、すでにexportされている環境変数が自動的にスキャン対象になります。
 値は子プロセスの環境変数にのみ存在し、ディスクには書き出されません。
 
 ```bash
-op run --env-file=snowflake.env -- snow connection test -c myproject
-op run --env-file=snowflake.env -- snow sql -c myproject -q "SELECT CURRENT_USER()"
+op run -- snow connection test -c myproject
+op run -- snow sql -c myproject -q "SELECT CURRENT_USER()"
 ```
 
 実行時には1Passwordのロック解除（生体認証など）を求められるため、PCが盗まれても、そのままでは鍵を使われません。
 
-毎回 `op run ...` と打つのは面倒なので、シェルのエイリアスや関数にしておくと便利です。
+毎回 `op run ...` と打つのは面倒なので、シェルのエイリアスにしておくと便利です。
 
 ```bash
-alias snow='op run --env-file=snowflake.env -- snow'
+alias snow='op run -- snow'
 ```
 
 :::message
@@ -206,21 +214,21 @@ user = "USER_B"
 authenticator = "SNOWFLAKE_JWT"
 ```
 
-鍵の参照は、プロジェクトごとの環境変数ファイルに分けます。コネクション名ごとに環境変数名が異なるため、同じファイルにまとめて書くこともできます。
+鍵の参照も、プロジェクトごとの `.envrc` に分けてexportしておきます。コネクション名ごとに環境変数名が異なるため、同じファイルにまとめて書くこともできます。
 
-```bash:project_a/snowflake.env
-SNOWFLAKE_CONNECTIONS_PROJECT_A_PRIVATE_KEY_RAW=op://Development/snowflake-project-a/private key
+```bash:project_a/.envrc
+export SNOWFLAKE_CONNECTIONS_PROJECT_A_PRIVATE_KEY_RAW=op://Development/snowflake-project-a/private key
 ```
 
-```bash:project_b/snowflake.env
-SNOWFLAKE_CONNECTIONS_PROJECT_B_PRIVATE_KEY_RAW=op://Development/snowflake-project-b/private key
+```bash:project_b/.envrc
+export SNOWFLAKE_CONNECTIONS_PROJECT_B_PRIVATE_KEY_RAW=op://Development/snowflake-project-b/private key
 ```
 
-これで、各プロジェクトのディレクトリで次のように実行すれば、そのプロジェクト用の鍵が使われます。
+これで、各プロジェクトのディレクトリに入る（`direnv allow` 実行後）だけで環境変数が読み込まれ、次のように実行すれば、そのプロジェクト用の鍵が使われます。
 
 ```bash
 cd project_a
-op run --env-file=snowflake.env -- snow sql -c project_a -q "SELECT CURRENT_ACCOUNT()"
+op run -- snow sql -c project_a -q "SELECT CURRENT_ACCOUNT()"
 ```
 
 ### デフォルトのコネクションを切り替える
@@ -232,21 +240,21 @@ op run --env-file=snowflake.env -- snow sql -c project_a -q "SELECT CURRENT_ACCO
 snow connection set-default project_a
 ```
 
-プロジェクトごとに切り替えるには、環境変数 `SNOWFLAKE_DEFAULT_CONNECTION_NAME` を使うと便利です。
-[direnv](https://direnv.net/) と組み合わせれば、ディレクトリに入るだけで切り替わります。
+プロジェクトごとに切り替えるには、環境変数 `SNOWFLAKE_DEFAULT_CONNECTION_NAME` を使うと便利です。先ほどの `.envrc` に追記しておきます。
 
-```bash:.envrc
+```bash:project_a/.envrc
 export SNOWFLAKE_DEFAULT_CONNECTION_NAME=project_a
+export SNOWFLAKE_CONNECTIONS_PROJECT_A_PRIVATE_KEY_RAW=op://Development/snowflake-project-a/private key
 ```
 
-あわせて、`snow` のエイリアスをプロジェクトの `snowflake.env` を読むようにしておくと、`snow sql -q "..."` と打つだけで、そのプロジェクトのコネクションと鍵が使われます。
+あわせて、`alias snow='op run -- snow'` としておけば、ディレクトリに入って `snow sql -q "..."` と打つだけで、そのプロジェクトのコネクションと鍵が使われます。
 
 ### 設定ファイル自体を分ける
 
 プロジェクトのリポジトリに設定を同梱したい場合は、`--config-file` で `config.toml` を指定する方法もあります。
 
 ```bash
-op run --env-file=snowflake.env -- snow --config-file ./config.toml sql -q "SELECT 1"
+op run -- snow --config-file ./config.toml sql -q "SELECT 1"
 ```
 
 なお、コネクションのパラメーターには優先順位があります。**コマンドラインの引数 > 環境変数 > `config.toml`** の順に優先されます。そのため、`config.toml` には共通の設定を、環境変数には秘密情報や環境ごとの差分を、という使い分けがしやすいです。

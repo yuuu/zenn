@@ -121,39 +121,37 @@ snow connection test -c myproject
 ## 1Passwordとの連携方法
 
 ここまでの方法では、秘密鍵ファイルとパスフレーズがPCに残ってしまいます。
-そこで、秘密鍵を1Passwordに保管し、必要なときだけ [1Password CLI](https://developer.1password.com/docs/cli/)（`op`）経由で取り出す方法を紹介します。
+そこで、秘密鍵を1Passwordの「SSH Key」型アイテムとして保管し、必要なときだけ [1Password CLI](https://developer.1password.com/docs/cli/)（`op`）経由で取り出す方法を紹介します。
 
 Snowflake CLIには、秘密鍵の中身を直接渡す `private_key_raw` という設定があります。
 環境変数 `SNOWFLAKE_CONNECTIONS_<コネクション名>_PRIVATE_KEY_RAW` で与えることができるので、これを `op run` と組み合わせます。
 
 ### 1. 1Passwordに秘密鍵を保存する
 
-1Passwordに、次のようなアイテムを作成します。ここでは例として、`Development` Vaultの `snowflake-myproject` というアイテムとします。
+1Passwordアプリで「新規アイテム」→「SSH Key」を選び、「既存の鍵をインポート」から `rsa_key.p8` を読み込みます。ここでは例として、`Development` Vaultに `snowflake-myproject` という名前で保存するとします。
 
-| フィールド | 内容 |
-| --- | --- |
-| `private_key` | `rsa_key.p8` の中身（`-----BEGIN ENCRYPTED PRIVATE KEY-----` から末尾まで） |
-| `passphrase` | 秘密鍵のパスフレーズ |
+秘密鍵をパスフレーズで暗号化している場合、インポート時にそのパスフレーズの入力を求められます。
+
+:::message
+ここで入力するパスフレーズは、鍵をインポートする際に復号するためだけに使われます。1PasswordはSSH Key型アイテムに復号後の秘密鍵を保存するため、パスフレーズ自体を後から `op` コマンドで取り出すことはできません。そのため、以降の手順でもパスフレーズは不要になります。
+:::
 
 保存できたら、PC上の `rsa_key.p8` は削除してしまって構いません。
 
 ```bash
 # 内容を確認できたらローカルの鍵を削除
-op read "op://Development/snowflake-myproject/private_key" | head -1
+op read "op://Development/snowflake-myproject/private key" | head -1
 shred -u rsa_key.p8   # macOSの場合は rm -P rsa_key.p8
 ```
 
-:::message
-複数行のテキストをフィールドに貼り付けるときは、改行が保持されるか、`op read` の出力で確認してください。
-:::
+`op read` はデフォルトで、復号済みのPKCS#8 PEM形式（`-----BEGIN PRIVATE KEY-----`）の秘密鍵を返します。
 
 ### 2. 環境変数ファイルに参照を書く
 
 `op://` 形式の「シークレット参照」を環境変数ファイルに書きます。ここには秘密情報そのものは含まれないため、Gitにコミットしても問題ありません。
 
 ```bash:snowflake.env
-SNOWFLAKE_CONNECTIONS_MYPROJECT_PRIVATE_KEY_RAW=op://Development/snowflake-myproject/private_key
-PRIVATE_KEY_PASSPHRASE=op://Development/snowflake-myproject/passphrase
+SNOWFLAKE_CONNECTIONS_MYPROJECT_PRIVATE_KEY_RAW=op://Development/snowflake-myproject/private key
 ```
 
 `config.toml` の側は、`private_key_file` を削除します。
@@ -211,13 +209,11 @@ authenticator = "SNOWFLAKE_JWT"
 鍵の参照は、プロジェクトごとの環境変数ファイルに分けます。コネクション名ごとに環境変数名が異なるため、同じファイルにまとめて書くこともできます。
 
 ```bash:project_a/snowflake.env
-SNOWFLAKE_CONNECTIONS_PROJECT_A_PRIVATE_KEY_RAW=op://Development/snowflake-project-a/private_key
-PRIVATE_KEY_PASSPHRASE=op://Development/snowflake-project-a/passphrase
+SNOWFLAKE_CONNECTIONS_PROJECT_A_PRIVATE_KEY_RAW=op://Development/snowflake-project-a/private key
 ```
 
 ```bash:project_b/snowflake.env
-SNOWFLAKE_CONNECTIONS_PROJECT_B_PRIVATE_KEY_RAW=op://Development/snowflake-project-b/private_key
-PRIVATE_KEY_PASSPHRASE=op://Development/snowflake-project-b/passphrase
+SNOWFLAKE_CONNECTIONS_PROJECT_B_PRIVATE_KEY_RAW=op://Development/snowflake-project-b/private key
 ```
 
 これで、各プロジェクトのディレクトリで次のように実行すれば、そのプロジェクト用の鍵が使われます。

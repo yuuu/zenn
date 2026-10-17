@@ -8,7 +8,8 @@ topics:
   - snowpipe
   - aws
   - terraform
-published: false
+published: true
+published_at: "2026-10-19 07:30"
 publication_name: fusic
 ---
 

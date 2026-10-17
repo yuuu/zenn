@@ -40,6 +40,11 @@ publication_name: fusic
 LLMの呼び出しには、SnowflakeのSQLから直接LLMを呼べる `AI_COMPLETE` 関数を使います。
 構造化出力(JSON Schemaで出力の形を指定する機能)を使うので、結果をそのままテーブルに展開できます。
 
+本記事で使ったTerraform・SQL・サンプルの議事録は、全て次のリポジトリで公開しています。
+記事では要点となる部分だけを抜粋して掲載します。
+
+https://github.com/yuuu/snowflake-meeting-minutes-metadata
+
 ## 全体像
 
 構成は次の通りです。
@@ -124,19 +129,9 @@ ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
 マスターの「説明」や「別名」は、LLMが判断するためのヒントとしてプロンプトに入れます。
 例えば `kubernetes` に別名 `EKS` を入れておくと、議事録に「EKS」としか書かれていなくても `kubernetes` タグが付きやすくなります。
 
+主なテーブルの定義を抜粋します(全体は [sql/01_base.sql](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/sql/01_base.sql) を参照してください)。
+
 ```sql
-USE ROLE ACCOUNTADMIN;
-CREATE DATABASE IF NOT EXISTS MEETING_DB;
-CREATE SCHEMA IF NOT EXISTS MEETING_DB.APP;
-USE SCHEMA MEETING_DB.APP;
-
-CREATE WAREHOUSE IF NOT EXISTS MEETING_WH
-  WAREHOUSE_SIZE = 'XSMALL'
-  AUTO_SUSPEND = 60
-  AUTO_RESUME = TRUE
-  INITIALLY_SUSPENDED = TRUE;
-
--- ===== マスター =====
 CREATE OR REPLACE TABLE TAG_MASTER (
   TAG_CODE    VARCHAR      NOT NULL PRIMARY KEY,  -- 例: aws-lambda
   TAG_NAME    VARCHAR      NOT NULL,              -- 表示名
@@ -146,43 +141,13 @@ CREATE OR REPLACE TABLE TAG_MASTER (
   IS_ACTIVE   BOOLEAN      DEFAULT TRUE
 );
 
-CREATE OR REPLACE TABLE PROJECT_MASTER (
-  PROJECT_CODE VARCHAR     NOT NULL PRIMARY KEY,  -- 例: PRJ-001
-  PROJECT_NAME VARCHAR     NOT NULL,
-  DESCRIPTION  VARCHAR,
-  KEYWORDS     ARRAY,                             -- 判定のヒント
-  IS_ACTIVE    BOOLEAN     DEFAULT TRUE
-);
-
-CREATE OR REPLACE TABLE STATUS_MASTER (
-  STATUS_CODE VARCHAR NOT NULL PRIMARY KEY,
-  STATUS_NAME VARCHAR NOT NULL,
-  DESCRIPTION VARCHAR                              -- 判定の目安
-);
-
 INSERT INTO TAG_MASTER (TAG_CODE, TAG_NAME, CATEGORY, DESCRIPTION, ALIASES)
 SELECT $1,$2,$3,$4,PARSE_JSON($5) FROM VALUES
- ('aws-lambda','AWS Lambda','Cloud','サーバーレス関数実行サービス','["Lambda","ラムダ"]'),
  ('aws-s3','Amazon S3','Cloud','オブジェクトストレージ','["S3"]'),
- ('terraform','Terraform','IaC','HashiCorp製のIaCツール','["tf"]'),
  ('kubernetes','Kubernetes','Infra','コンテナオーケストレーション','["k8s","EKS"]'),
- ('react','React','Frontend','UIライブラリ','["React.js"]'),
  ('nextjs','Next.js','Frontend','Reactベースのフレームワーク','["Next"]'),
- ('typescript','TypeScript','Language','型付きJavaScript','["TS"]'),
- ('ruby-on-rails','Ruby on Rails','Backend','RubyのWebフレームワーク','["Rails"]'),
- ('postgresql','PostgreSQL','DB','RDB','["Postgres","Aurora PostgreSQL"]'),
- ('snowflake','Snowflake','DataPlatform','クラウドデータプラットフォーム','["スノーフレーク"]'),
- ('oauth','OAuth/OIDC','Security','認可・認証プロトコル','["OIDC","SSO"]'),
- ('github-actions','GitHub Actions','CI/CD','CI/CDサービス','["GHA"]'),
- ('web-performance','Webパフォーマンス','Frontend','表示速度・Core Web Vitals改善','["LCP","CWV"]'),
+ -- ...(全14件)
  ('observability','オブザーバビリティ','Ops','監視・ログ・トレース','["Datadog","CloudWatch","監視"]');
-
-INSERT INTO PROJECT_MASTER (PROJECT_CODE, PROJECT_NAME, DESCRIPTION, KEYWORDS)
-SELECT $1,$2,$3,PARSE_JSON($4) FROM VALUES
- ('PRJ-001','ECサイトリニューアル','既存ECサイトをNext.jsとAPIへ刷新する','["EC","カート","決済","リニューアル"]'),
- ('PRJ-002','社内データ分析基盤','SnowflakeによるKPI可視化基盤の構築','["BI","ダッシュボード","データ基盤","KPI"]'),
- ('PRJ-003','顧客向けモバイルAPI','モバイルアプリ向けRails APIのAWS移行','["モバイル","API","Lambda","Rails"]'),
- ('PRJ-004','認証基盤統合','複数サービスのSSO統合','["SSO","ログイン","IdP"]');
 
 INSERT INTO STATUS_MASTER VALUES
  ('NOT_STARTED','未着手','着手前・計画段階・キックオフ'),
@@ -191,13 +156,6 @@ INSERT INTO STATUS_MASTER VALUES
  ('ON_HOLD','保留','意図的に中断・優先度下げ'),
  ('COMPLETED','完了','リリース済み・作業完了を宣言した'),
  ('UNKNOWN','不明','議事録から判断できない');
-
--- ===== 取り込み先・結果 =====
-CREATE OR REPLACE TABLE RAW_TRANSCRIPTS (
-  FILE_PATH   VARCHAR,
-  CONTENT     VARCHAR,       -- ファイル全体
-  LOADED_AT   TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-);
 
 CREATE OR REPLACE TABLE TRANSCRIPT_METADATA (
   FILE_PATH       VARCHAR NOT NULL,
@@ -210,18 +168,6 @@ CREATE OR REPLACE TABLE TRANSCRIPT_METADATA (
   MODEL_NAME      VARCHAR,
   ANALYZED_AT     TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
   PRIMARY KEY (FILE_PATH)
-);
-
-CREATE OR REPLACE TABLE TRANSCRIPT_TAG (
-  FILE_PATH VARCHAR NOT NULL,
-  TAG_CODE  VARCHAR NOT NULL,
-  PRIMARY KEY (FILE_PATH, TAG_CODE)
-);
-
-CREATE OR REPLACE TABLE UNKNOWN_TAG_CANDIDATE (
-  FILE_PATH  VARCHAR NOT NULL,
-  TAG_RAW    VARCHAR NOT NULL,
-  FOUND_AT   TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
 );
 ```
 
@@ -322,72 +268,16 @@ FROM RAW_TRANSCRIPTS r CROSS JOIN ctx;
 ## AWS側を作る(Terraform)
 
 S3バケットと、SnowflakeがS3を読むためのIAMロールをTerraformで作ります。
+コード全体は [terraform/main.tf](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/terraform/main.tf) を参照してください。
 
-```hcl:main.tf
-terraform {
-  required_version = ">= 1.5"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
+ポイントは、Snowflake側の情報が揃うまで、IAMロールの信頼先とS3イベント通知を「仮の状態」にしておく部分です。
 
-provider "aws" {
-  region = var.region
-}
-
-data "aws_caller_identity" "current" {}
-
-variable "region" {
-  type    = string
-  default = "ap-northeast-1"
-}
-
-variable "bucket_name" {
-  type = string
-}
-
-variable "role_name" {
-  type    = string
-  default = "snowflake-meeting-transcripts-role"
-}
-
-# 2回目のapplyで設定する(DESC INTEGRATIONの値)。1回目は空のまま
-variable "snowflake_iam_user_arn" {
-  type    = string
-  default = ""
-}
-
-variable "snowflake_external_id" {
-  type    = string
-  default = ""
-}
-
-# SHOW PIPES の notification_channel (SQS ARN)。3回目のapplyで設定する
-variable "snowpipe_sqs_arn" {
-  type    = string
-  default = ""
-}
-
+```hcl:main.tf(抜粋)
 locals {
   prefix          = "transcripts/"
   second_phase    = var.snowflake_iam_user_arn != "" && var.snowflake_external_id != ""
+  # Snowflake側の値が渡されるまでは、信頼先を仮に自アカウントにしておく
   trust_principal = local.second_phase ? var.snowflake_iam_user_arn : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-}
-
-resource "aws_s3_bucket" "transcripts" {
-  bucket        = var.bucket_name
-  force_destroy = true # 検証用。クリーンアップを楽にする
-}
-
-resource "aws_s3_bucket_public_access_block" "transcripts" {
-  bucket                  = aws_s3_bucket.transcripts.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
 }
 
 data "aws_iam_policy_document" "trust" {
@@ -397,6 +287,7 @@ data "aws_iam_policy_document" "trust" {
       type        = "AWS"
       identifiers = [local.trust_principal]
     }
+    # 外部IDの条件は、値が渡されてから付ける
     dynamic "condition" {
       for_each = local.second_phase ? [1] : []
       content {
@@ -408,34 +299,7 @@ data "aws_iam_policy_document" "trust" {
   }
 }
 
-resource "aws_iam_role" "snowflake" {
-  name               = var.role_name
-  assume_role_policy = data.aws_iam_policy_document.trust.json
-}
-
-data "aws_iam_policy_document" "s3_read" {
-  statement {
-    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
-    resources = ["${aws_s3_bucket.transcripts.arn}/${local.prefix}*"]
-  }
-  statement {
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.transcripts.arn]
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["${local.prefix}*"]
-    }
-  }
-}
-
-resource "aws_iam_role_policy" "s3_read" {
-  name   = "s3-read-transcripts"
-  role   = aws_iam_role.snowflake.id
-  policy = data.aws_iam_policy_document.s3_read.json
-}
-
-# Snowpipe auto-ingest 用のS3イベント通知(Snowflake管理のSQSへ)
+# Snowpipe auto-ingest 用のS3イベント通知。SQSのARNが渡されてから作る
 resource "aws_s3_bucket_notification" "snowpipe" {
   count  = var.snowpipe_sqs_arn != "" ? 1 : 0
   bucket = aws_s3_bucket.transcripts.id
@@ -446,14 +310,6 @@ resource "aws_s3_bucket_notification" "snowpipe" {
     filter_prefix = local.prefix
     filter_suffix = ".md"
   }
-}
-
-output "role_arn" {
-  value = aws_iam_role.snowflake.arn
-}
-
-output "bucket_name" {
-  value = aws_s3_bucket.transcripts.bucket
 }
 ```
 
@@ -467,6 +323,8 @@ SnowflakeとAWSは、お互いの情報が無いと設定を完成できませ�
 | 3回目 | S3イベント通知 | PipeのSQS ARN |
 
 ### 1回目: バケットとIAMロール
+
+以降の `terraform` コマンドは、リポジトリの `terraform/` ディレクトリで実行します。
 
 ```sh
 export BUCKET=meeting-transcripts-$(aws sts get-caller-identity --query Account --output text)-demo
@@ -583,6 +441,7 @@ SELECT SYSTEM$PIPE_STATUS('MEETING_DB.APP.TRANSCRIPT_PIPE');
 ## Stream + Task でLLM解析を自動化する
 
 `RAW_TRANSCRIPTS` に新しい行が入ったら、先ほどのプロンプトで解析し、結果を3つのテーブルに書き込むTaskを作ります。
+全体は [sql/04_pipeline.sql](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/sql/04_pipeline.sql) にあります。ここでは、LLMの呼び出し(前章と同じ)以外の部分を抜粋します。
 
 ```sql
 CREATE OR REPLACE STREAM RAW_TRANSCRIPTS_STREAM ON TABLE RAW_TRANSCRIPTS APPEND_ONLY = TRUE;
@@ -599,52 +458,9 @@ BEGIN
     SELECT FILE_PATH, CONTENT FROM RAW_TRANSCRIPTS_STREAM
     QUALIFY ROW_NUMBER() OVER (PARTITION BY FILE_PATH ORDER BY LOADED_AT DESC) = 1;
 
-  -- 2. LLM呼び出し(1ファイル1回)
+  -- 2. LLM呼び出し(1ファイル1回)。中身は前章のSELECTと同じなので省略
   CREATE OR REPLACE TEMPORARY TABLE TMP_RESULT AS
-  WITH ctx AS (
-    SELECT
-      (SELECT LISTAGG('- ' || TAG_CODE || ': ' || TAG_NAME || '(' || COALESCE(DESCRIPTION,'') || ' / 別名: ' || COALESCE(ARRAY_TO_STRING(ALIASES, ','),'') || ')', '\n')
-         WITHIN GROUP (ORDER BY TAG_CODE) FROM TAG_MASTER WHERE IS_ACTIVE) AS TAGS_TXT,
-      (SELECT LISTAGG('- ' || PROJECT_CODE || ': ' || PROJECT_NAME || '(' || COALESCE(DESCRIPTION,'') || ' / キーワード: ' || COALESCE(ARRAY_TO_STRING(KEYWORDS, ','),'') || ')', '\n')
-         WITHIN GROUP (ORDER BY PROJECT_CODE) FROM PROJECT_MASTER WHERE IS_ACTIVE) AS PROJECTS_TXT,
-      (SELECT LISTAGG('- ' || STATUS_CODE || ': ' || STATUS_NAME || '(' || COALESCE(DESCRIPTION,'') || ')', '\n')
-         WITHIN GROUP (ORDER BY STATUS_CODE) FROM STATUS_MASTER) AS STATUS_TXT
-  )
-  SELECT
-    n.FILE_PATH,
-    AI_COMPLETE(
-      model => 'claude-sonnet-4-6',
-      prompt => CONCAT(
-        'あなたは会議議事録を分類するアシスタントです。以下のマスターに基づいて議事録を分析してください。\n',
-        '## ルール\n',
-        '- tags は「タグマスター」の TAG_CODE のみを使う。議事録で実質的に議論された技術のみ(言及だけは除く)。最大5個。\n',
-        '- マスターに無いが重要な技術が議論されている場合は unknown_tags に自由記述で入れる。\n',
-        '- project_code は「プロジェクトマスター」の PROJECT_CODE から1つ。判断できない場合は null。\n',
-        '- status_code は「状況マスター」の STATUS_CODE から1つ。判断できない場合は UNKNOWN。\n',
-        '- evidence には判断の根拠となる議事録内の文を1〜3個、原文から一字一句そのままコピーして配列で入れる。括弧・話者名・記号を付け足したり、複数の文をつなげたりしない。\n',
-        '- summary は日本語で2文以内。\n\n',
-        '## タグマスター\n', c.TAGS_TXT, '\n\n',
-        '## プロジェクトマスター\n', c.PROJECTS_TXT, '\n\n',
-        '## 状況マスター\n', c.STATUS_TXT, '\n\n',
-        '## 議事録\n', n.CONTENT),
-      response_format => {
-        'type': 'json',
-        'schema': {
-          'type': 'object',
-          'properties': {
-            'summary':      {'type': 'string'},
-            'project_code': {'type': ['string','null']},
-            'status_code':  {'type': 'string'},
-            'tags':         {'type': 'array', 'items': {'type': 'string'}},
-            'unknown_tags': {'type': 'array', 'items': {'type': 'string'}},
-            'evidence':     {'type': 'array', 'items': {'type': 'string'}}
-          },
-          'required': ['summary','project_code','status_code','tags','unknown_tags','evidence'],
-          'additionalProperties': false
-        }
-      }
-    ) AS R
-  FROM TMP_NEW n CROSS JOIN ctx c;
+    SELECT n.FILE_PATH, AI_COMPLETE(...) AS R FROM TMP_NEW n CROSS JOIN ctx c;
 
   -- 3. メタデータ(マスターに無い値はNULL化し、生の値は残す)
   MERGE INTO TRANSCRIPT_METADATA t
@@ -662,11 +478,8 @@ BEGIN
     LEFT JOIN STATUS_MASTER sm ON sm.STATUS_CODE = r.R:status_code::STRING
     WHERE r.R IS NOT NULL
   ) s ON t.FILE_PATH = s.FILE_PATH
-  WHEN MATCHED THEN UPDATE SET PROJECT_CODE = s.PROJECT_CODE, PROJECT_RAW = s.PROJECT_RAW,
-    STATUS_CODE = s.STATUS_CODE, SUMMARY = s.SUMMARY, EVIDENCE = s.EVIDENCE,
-    RAW_RESPONSE = s.RAW_RESPONSE, MODEL_NAME = 'claude-sonnet-4-6', ANALYZED_AT = CURRENT_TIMESTAMP()
-  WHEN NOT MATCHED THEN INSERT (FILE_PATH, PROJECT_CODE, PROJECT_RAW, STATUS_CODE, SUMMARY, EVIDENCE, RAW_RESPONSE, MODEL_NAME)
-    VALUES (s.FILE_PATH, s.PROJECT_CODE, s.PROJECT_RAW, s.STATUS_CODE, s.SUMMARY, s.EVIDENCE, s.RAW_RESPONSE, 'claude-sonnet-4-6');
+  WHEN MATCHED THEN UPDATE SET ...
+  WHEN NOT MATCHED THEN INSERT ...;
 
   -- 4. タグ(多対多)。マスターに存在するものだけ展開。再解析に備えて一度削除
   DELETE FROM TRANSCRIPT_TAG WHERE FILE_PATH IN (SELECT FILE_PATH FROM TMP_RESULT WHERE R IS NOT NULL);
@@ -699,7 +512,39 @@ ALTER TASK ANALYZE_TRANSCRIPTS_TASK RESUME;
 ## 動かしてみる
 
 5本の議事録をS3にアップロードします。
-1本目は冒頭の画像の議事録で、残りの4本は技術・プロジェクト・状況がそれぞれ異なるように作ったサンプルです。
+技術・プロジェクト・状況がそれぞれ異なるように作ったサンプルで、中身は [samples/](https://github.com/yuuu/snowflake-meeting-minutes-metadata/tree/main/samples) にあります。
+
+| ファイル | 内容 |
+| --- | --- |
+| [meeting_2026-09-30_ec_cart.md](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/samples/meeting_2026-09-30_ec_cart.md) | ECリニューアルの週次定例。Next.jsへの移行が順調で、LCP改善のため画像をS3+CDNへ |
+| [meeting_2026-10-01_data_platform.md](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/samples/meeting_2026-10-01_data_platform.md) | データ分析基盤の進捗確認。PostgreSQLからの連携が、IP許可申請の未承認で止まっている |
+| [meeting_2026-10-01_dev_weekly.md](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/samples/meeting_2026-10-01_dev_weekly.md) | 冒頭の画像の議事録。決済タイムアウトの障害対応とリリース延期 |
+| [meeting_2026-10-02_auth_sso.md](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/samples/meeting_2026-10-02_auth_sso.md) | 認証基盤統合のリリース後レビュー。SSO移行が完了し、プロジェクトをクローズ |
+| [meeting_2026-10-02_study_session.md](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/samples/meeting_2026-10-02_study_session.md) | 社内勉強会の企画ブレスト。どのプロジェクトにも属さず、Rust・WebAssemblyはマスター外 |
+
+例えば ec_cart は次のような内容です。
+
+```markdown:meeting_2026-09-30_ec_cart.md
+# ECリニューアル 週次定例
+
+| 項目 | 内容 |
+|---|---|
+| 日付 | 2026-09-30 |
+| 参加者 | 田中(PM)、佐藤(FE)、鈴木(BE) |
+
+## 議事
+
+- 田中: 先週に引き続きカート画面の実装状況を確認したい。
+- 佐藤: Next.jsのApp Routerへの移行は8割終わった。カートの状態管理はTypeScriptの型定義を整理して、ほぼ完了。
+- 佐藤: ただ、商品一覧ページのLCPが3.5秒あり、目標の2.5秒に届いていない。画像をS3に置いてCDN配信に切り替える方向で調整する。
+- 鈴木: 画像のS3バケットは今週中に作る。決済APIの仕様は先方から回答済みなので問題ない。
+- 田中: スケジュールは予定通り。来週は決済画面の実装に入る。
+
+## 決定事項
+
+1. 画像配信をS3+CDNへ変更する
+2. 来週から決済画面に着手する
+```
 
 ```sh
 aws s3 cp ./samples/ "s3://${BUCKET}/transcripts/" --recursive --exclude "*" --include "*.md"
@@ -957,6 +802,8 @@ GROUP BY 1;
 このほか、Snowpipeのサーバーレス課金と、Task実行時のウェアハウス(XSMALL、`AUTO_SUSPEND = 60`)の課金がかかります。
 
 ## 後片付け
+
+リポジトリの [sql/99_cleanup.sql](https://github.com/yuuu/snowflake-meeting-minutes-metadata/blob/main/sql/99_cleanup.sql) と同じ内容です。
 
 ```sql
 ALTER TASK MEETING_DB.APP.ANALYZE_TRANSCRIPTS_TASK SUSPEND;

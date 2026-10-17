@@ -1,5 +1,5 @@
 ---
-title: "Markdownの議事録をS3に置くだけで、Snowflake Cortex AIがタグ・プロジェクト・状況を付けてくれる仕組みを作る"
+title: "「止まっている案件はどれ?」にSQLで答える。Snowflake Cortex AIで議事録を自動分類する"
 emoji: "❄️"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics:

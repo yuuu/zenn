@@ -28,6 +28,10 @@ publication_name: fusic
 
 ![](/images/snowflake-ai-parse-document-minutes/001.png)
 
+:::message
+本記事に登場する議事録、プロジェクト、人名、数値などのデータは、全て検証用に作成した架空のものです。実在の組織・人物・案件とは関係ありません。
+:::
+
 1分ほどで、こんな行がテーブルに入ります。
 
 | FILE_PATH | PROJECT_CODE | STATUS_CODE | マスター外の技術 |
@@ -512,7 +516,7 @@ ALTER TASK ANALYZE_TRANSCRIPTS_TASK RESUME;
 ## 動かしてみる
 
 5本の議事録をS3にアップロードします。
-技術・プロジェクト・状況がそれぞれ異なるように作ったサンプルで、中身は [samples/](https://github.com/yuuu/snowflake-meeting-minutes-metadata/tree/main/samples) にあります。
+技術・プロジェクト・状況がそれぞれ異なるように作った架空の議事録で、中身は [samples/](https://github.com/yuuu/snowflake-meeting-minutes-metadata/tree/main/samples) にあります。
 
 | ファイル | 内容 |
 | --- | --- |

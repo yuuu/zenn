@@ -29,10 +29,6 @@ publication_name: fusic
 
 ![](/images/snowflake-ai-parse-document-minutes/001.png)
 
-:::message
-本記事に登場する議事録、プロジェクト、人名、数値などのデータは、全て検証用に作成した架空のものです。実在の組織・人物・案件とは関係ありません。
-:::
-
 1分ほどで、こんな行がテーブルに入ります。
 
 | FILE_PATH | PROJECT_CODE | STATUS_CODE | マスター外の技術 |
@@ -49,6 +45,10 @@ LLMの呼び出しには、SnowflakeのSQLから直接LLMを呼べる `AI_COMPLE
 記事では要点となる部分だけを抜粋して掲載します。
 
 https://github.com/yuuu/snowflake-meeting-minutes-metadata
+
+:::message
+本記事に登場する議事録、プロジェクト、人名、数値などのデータは、全て検証用に作成した架空のものです。実在の組織・人物・案件とは関係ありません。
+:::
 
 ## 全体像
 

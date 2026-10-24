@@ -30,6 +30,10 @@ https://zenn.dev/fusic/articles/snowflake-cli-openssl-auth-1password
 
 https://github.com/1Password/shell-plugins/pull/694
 
+このプラグインを使うと、`snow` コマンドを実行したときに、次のような流れで1Passwordの認証情報が渡されます。
+
+![](/images/snowflake-cli-1password-shell-plugin/overview.drawio.png)
+
 本記事では、このプラグインを**利用者としてどういう手順で使うのか**を中心に紹介します。1Password CLIのShell Pluginsを触ったことがない方にも分かるよう、仕組みの説明から始めます。後半では、設計で考えたことも少しだけ紹介します。
 
 :::message alert
